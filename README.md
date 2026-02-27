@@ -163,80 +163,52 @@ sequenceDiagram
 ```yaml
 # 数据配置
 data:
-  train_path: "feature_parameters.csv"         # 训练数据路径
-  target_column: "Nexp (kN)"                   # 目标列（承载力）
-  test_size: 0.2                               # 测试集比例（20%）
-  random_state: 42                             # 随机种子
-
-  # 剔除的列（几何参数）
-  columns_to_drop:                             #
-    - "b (mm)"                                # 截面宽度
-    - "h (mm)"                                # 截面高度
-    - "r0 (mm)"                               # 圆角半径
-    - "t (mm)"                                # 钢管厚度
-    - "L (mm)"                                # 柱长
-    - "lambda"                                # 长细比
+  file_path: "data/raw/feature_parameters_unique.csv"
+  target_column: "Nexp (kN)"
+  target_transform:
+    enabled: true
+    type: "log"
+  columns_to_drop:
+    - "b (mm)"
+    - "h (mm)"
+    - "r0 (mm)"
+    - "t (mm)"
+    - "L (mm)"
+    - "lambda"
+  test_size: 0.2
+  random_state: 42
 
 # 模型配置
 model:
-  type: "xgboost"                              # 模型类型
+  # 注意：XGBoost 参数必须放在 model.params 下（严格约束）
+  params:
+    objective: "reg:squarederror"
+    max_depth: 5
+    learning_rate: 0.05
+    n_estimators: 1200
+    min_child_weight: 10
+    subsample: 0.8
+    colsample_bytree: 0.75
+    reg_alpha: 0.5
+    reg_lambda: 2.0
+    gamma: 0.05
+    random_state: 42
+    tree_method: "hist"
+    device: "cpu"
+    n_jobs: -1
+  use_optuna: true
+  n_trials: 400
+  optuna_timeout: 14400
+  optuna_storage_url: "sqlite:///logs/optuna_study.db"
+  best_params_path: "logs/best_params.json"
+  early_stopping_rounds: 100
+  eval_metric: "rmse"
+  validation_size: 0.15
 
-  # XGBoost超参数
-  xgboost_params:
-    objective: "reg:squarederror"              # 目标函数
-    n_estimators: 200                          # 树的数量
-    learning_rate: 0.1                         # 学习率
-    max_depth: 6                               # 树最大深度
-    min_child_weight: 3                        # 最小子节点权重
-    subsample: 0.8                             # 样本采样比例
-    colsample_bytree: 0.8                      # 特征采样比例
-    gamma: 0                                   # 最小损失减少
-    reg_alpha: 0                               # L1正则化
-    reg_lambda: 1                              # L2正则化
-    max_delta_step: 0                          # 最大增量步长
-    random_state: 42                           # 随机种子
-    n_jobs: -1                                 # 并行数（-1为全部核心）
-
-# 交叉验证配置
-cross_validation:
-  k_folds: 5                                   # K折交叉验证
-  scoring: "neg_root_mean_squared_error"       # 评分指标
+cv:
+  n_splits: 5
   random_state: 42
-
-# 超参数优化（Optuna）
-optuna:
-  enabled: true                                # 是否启用
-  n_trials: 100                                # 试验次数
-  timeout: 3600                                # 超时时间（秒）
-  study_name: "cfst_hyperopt"                  # 研究名称
-  direction: "minimize"                        # 优化方向
-
-  # 搜索空间
-  search_space:
-    n_estimators: {"type": "int", "low": 100, "high": 500, "step": 50}
-    learning_rate: {"type": "float", "low": 0.01, "high": 0.3, "log": true}
-    max_depth: {"type": "int", "low": 3, "high": 10, "step": 1}
-    min_child_weight: {"type": "int", "low": 1, "high": 10, "step": 1}
-    subsample: {"type": "float", "low": 0.6, "high": 1.0, "step": 0.1}
-    colsample_bytree: {"type": "float", "low": 0.6, "high": 1.0, "step": 0.1}
-    gamma: {"type": "float", "low": 0, "high": 0.3, "step": 0.05}
-    reg_alpha: {"type": "float", "low": 0, "high": 1, "step": 0.1}
-
-# 输出路径
-paths:
-  output_dir: "output"                         # 输出主目录
-  model_dir: "output/xgboost_model"            # 模型保存路径
-  plots_dir: "output/xgboost_model/plots"      # 图表路径
-  prediction_file: "output/predictions.csv"    # 预测结果文件
-
-# 日志配置
-logging:
-  level: "INFO"                                # 日志级别
-  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-  file: "output/ml_pipeline.log"               # 日志文件
-  max_file_size: 10485760                      # 单个日志文件最大大小（10MB）
-  backup_count: 5                              # 备份数量
-  console_output: true                         # 控制台输出
+  shuffle: true
 ```
 
 ---
@@ -249,11 +221,12 @@ logging:
 
 **Stage 1: 基础训练**（默认）
 - `use_optuna: false` - 使用预设参数进行训练
-- 用于评估基准性能
+- 若 `logs/best_params.json` 存在且 `context_hash` 匹配当前数据上下文，会自动加载该最优参数
 
 **Stage 2: Optuna深度调优**
 - `use_optuna: true` - 启用超参数自动搜索
-- 目标：优化COV指标至 < 0.05
+- 会先调优，再在同一轮使用最优参数重训最终模型
+- Study 名称按“数据文件 + 配置上下文”自动隔离，避免新旧数据混调
 
 ### 步骤1：环境准备
 
@@ -419,7 +392,9 @@ output/xgboost_model/
 本项目集成了 Optuna 持久化存储和智能参数加载功能，实现了：
 - **断点续训**：Optuna 优化过程自动保存到 SQLite 数据库，可随时中断和恢复
 - **参数记录**：最优参数自动保存到 JSON 文件，便于查看和复用
-- **智能加载**：当 `use_optuna: false` 时，自动加载最优参数进行训练
+- **同轮生效**：当 `use_optuna: true` 时，调优结束后立即用最优参数重训最终模型
+- **智能加载**：当 `use_optuna: false` 时，仅在上下文哈希匹配时自动加载最优参数
+- **数据隔离**：study 名称自动包含数据指纹，避免不同数据集共享同一调优轨迹
 
 ### 文件结构
 
@@ -445,6 +420,7 @@ python train.py --config config/config.yaml
 # 3. 自动生成文件：
 #    - logs/optuna_study.db（完整的 trials 记录）
 #    - logs/best_params.json（最优参数快照）
+# 4. 在同一轮训练中会自动使用最优参数重训最终模型
 ```
 
 **日志输出示例**：
@@ -483,7 +459,7 @@ python train.py --config config/config.yaml
 
 # 第二次运行：继续增加 50 trials
 python train.py --config config/config.yaml
-# 输出：加载已有 study，已完成 150 trials
+# 输出：加载相同 context 的 study，已完成 150 trials
 ```
 
 ### best_params.json 文件格式
@@ -492,6 +468,10 @@ python train.py --config config/config.yaml
 {
   "trial_number": 79,
   "best_rmse": 554.9208295740007,
+  "context_hash": "8ccf30fd3fd9",
+  "study_name": "xgboost_optimization__feature_parameters_unique__8ccf30fd3fd9",
+  "storage_url": "sqlite:///logs/optuna_study.db",
+  "data_file": "/abs/path/to/data/raw/feature_parameters_unique.csv",
   "parameters": {
     "max_depth": 7,
     "learning_rate": 0.10456477089212307,
@@ -520,8 +500,9 @@ python train.py --config config/config.yaml
 ### 注意事项
 
 1. **logs/ 目录自动创建**：首次运行时会自动创建
-2. **文件覆盖**：每次运行会更新 `best_params.json` 和 `optuna_study.db`
-3. **参数优先级**：`use_optuna: false` 时，加载的参数会覆盖 config.yaml 中的默认参数
+2. **文件覆盖**：每次运行会更新 `best_params.json`，并持续写入 `optuna_study.db`
+3. **参数优先级**：`use_optuna: false` 时，只有 `context_hash` 匹配才会覆盖 `model.params`
+4. **配置严格性**：XGBoost 参数必须定义在 `config.model.params`，顶层旧键会报错
 
 ---
 
@@ -898,7 +879,7 @@ imputer = SimpleImputer(strategy='median')
 **A**: 修改 `config/config.yaml`：
 ```yaml
 model:
-  xgboost_params:
+  params:
     n_estimators: 100    # 减少树的数量
     max_depth: 4         # 限制树深度
     min_child_weight: 5  # 增加最小叶子权重
@@ -938,7 +919,7 @@ best_features = subsets["best_r2"]["features"]
 
 ### 添加新特征
 
-1. **修改数据文件**：在 `feature_parameters.csv` 添加新列
+1. **修改数据文件**：在 `data/raw/feature_parameters_unique.csv` 添加新列
 2. **更新配置文件**：如果不需要剔除，无需修改
 3. **重新训练**：执行训练命令
 4. **验证**：检查模型性能提升
@@ -994,21 +975,22 @@ if __name__ == '__main__':
 
 1. **减少Optuna试验次数**：
    ```yaml
-   optuna:
+   model:
      n_trials: 50  # 从100减少到50
    ```
 
 2. **减少交叉验证折数**：
    ```yaml
-   cross_validation:
-     k_folds: 3  # 从5减少到3
+   cv:
+     n_splits: 3  # 从5减少到3
    ```
 
 3. **启用GPU加速**：
    ```yaml
    model:
-     xgboost_params:
+     params:
        tree_method: "gpu_hist"  # 使用GPU
+       device: "cuda"
    ```
 
 ### 预测速度优化

@@ -16,9 +16,13 @@ Usage:
 """
 
 import argparse
+import hashlib
+import json
+import re
 import sys
 import traceback
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import numpy as np
@@ -29,14 +33,32 @@ from src.data_loader import DataLoader
 from src.preprocessor import Preprocessor
 from src.model_trainer import ModelTrainer
 from src.evaluator import Evaluator
-from src.utils.model_utils import save_model, save_metadata
+from src.utils.model_utils import save_model
 from src.visualizer import (
     create_evaluation_dashboard,
-    plot_feature_importance,
-    print_feature_importance_ranking,
 )
 
 logger = setup_logger(__name__)
+
+
+XGB_PARAM_KEYS = {
+    "objective",
+    "max_depth",
+    "learning_rate",
+    "n_estimators",
+    "subsample",
+    "colsample_bytree",
+    "min_child_weight",
+    "reg_alpha",
+    "reg_lambda",
+    "gamma",
+    "random_state",
+    "tree_method",
+    "device",
+    "n_jobs",
+}
+
+REQUIRED_MODEL_PARAM_KEYS = XGB_PARAM_KEYS.copy()
 
 
 def load_config(config_path: str):
@@ -46,6 +68,88 @@ def load_config(config_path: str):
     with open(config_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
     return config
+
+
+def _file_sha256(file_path: str) -> str:
+    """Compute SHA256 for a file path."""
+    hasher = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def build_training_context(
+    data_file_path: str,
+    target_column: str,
+    target_transform_type: Optional[str],
+    columns_to_drop: List[str],
+) -> Dict[str, Any]:
+    """
+    Build deterministic training context for artifact compatibility checks.
+    """
+    data_sha256 = _file_sha256(data_file_path)
+    context_payload = {
+        "data_file": str(Path(data_file_path).resolve()),
+        "data_sha256": data_sha256,
+        "target_column": target_column,
+        "target_transform_type": target_transform_type or "none",
+        "columns_to_drop": sorted(columns_to_drop),
+    }
+    context_json = json.dumps(
+        context_payload, sort_keys=True, ensure_ascii=True
+    ).encode("utf-8")
+    context_hash = hashlib.sha256(context_json).hexdigest()[:12]
+    context_payload["context_hash"] = context_hash
+    return context_payload
+
+
+def build_study_name(data_file_path: str, context_hash: str) -> str:
+    """Build an Optuna study name isolated by dataset fingerprint."""
+    dataset_stem = Path(data_file_path).stem
+    sanitized_stem = re.sub(r"[^A-Za-z0-9_]+", "_", dataset_stem).strip("_")
+    return f"xgboost_optimization__{sanitized_stem}__{context_hash}"
+
+
+def build_xgb_params(model_config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Read model.params as the only valid hyperparameter source.
+    """
+    legacy_top_level_keys = sorted(XGB_PARAM_KEYS.intersection(model_config.keys()))
+    if legacy_top_level_keys:
+        raise ValueError(
+            "Legacy model hyperparameter keys at config.model top-level are not allowed: "
+            f"{legacy_top_level_keys}. Move them under config.model.params."
+        )
+
+    params = model_config.get("params")
+    if not isinstance(params, dict) or not params:
+        raise ValueError(
+            "config.model.params must be a non-empty dictionary and is the only valid "
+            "location for XGBoost hyperparameters."
+        )
+
+    missing_required = sorted(
+        key for key in REQUIRED_MODEL_PARAM_KEYS if key not in params
+    )
+    if missing_required:
+        raise ValueError(
+            f"config.model.params is missing required keys: {missing_required}"
+        )
+
+    return params.copy()
+
+
+def get_cv_n_splits(cv_config: Dict[str, Any]) -> int:
+    """Read cross-validation folds from cv.n_splits only."""
+    if "n_folds" in cv_config:
+        raise ValueError(
+            "config.cv.n_folds is deprecated. Use config.cv.n_splits instead."
+        )
+    n_splits = cv_config.get("n_splits", 5)
+    if not isinstance(n_splits, int) or n_splits < 2:
+        raise ValueError("config.cv.n_splits must be an integer >= 2")
+    return n_splits
 
 
 def train_model(config_path: str, output_dir: str = None) -> dict:
@@ -81,6 +185,8 @@ def train_model(config_path: str, output_dir: str = None) -> dict:
         data_path = data_config.get("file_path")
         target_column = data_config.get("target_column", "K")
         columns_to_drop = data_config.get("columns_to_drop", [])
+        if not data_path:
+            raise ValueError("config.data.file_path is required")
 
         # Set output directory
         if output_dir is None:
@@ -90,10 +196,6 @@ def train_model(config_path: str, output_dir: str = None) -> dict:
         logger.info(f"Data file: {data_path}")
         logger.info(f"Target column: {target_column}")
         logger.info(f"Columns to drop: {columns_to_drop}")
-
-        # Step 2: Load data
-        logger.info("\nStep 2: Loading data...")
-        data_loader = DataLoader(required_columns=[target_column])
 
         # Read target transform configuration
         target_transform_config = data_config.get("target_transform", {})
@@ -105,6 +207,21 @@ def train_model(config_path: str, output_dir: str = None) -> dict:
 
         if target_transform_type:
             logger.info(f"Target transform enabled: {target_transform_type}")
+
+        training_context = build_training_context(
+            data_file_path=data_path,
+            target_column=target_column,
+            target_transform_type=target_transform_type,
+            columns_to_drop=columns_to_drop,
+        )
+        context_hash = training_context["context_hash"]
+        study_name = build_study_name(data_path, context_hash)
+        logger.info(f"Training context hash: {context_hash}")
+        logger.info(f"Optuna study name: {study_name}")
+
+        # Step 2: Load data
+        logger.info("\nStep 2: Loading data...")
+        data_loader = DataLoader(required_columns=[target_column])
 
         features, target_transformed = data_loader.load_data(
             data_path, target_column, target_transform=target_transform_type
@@ -195,20 +312,14 @@ def train_model(config_path: str, output_dir: str = None) -> dict:
         use_optuna = model_config.get("use_optuna", False)
         n_trials = model_config.get("n_trials", 100)
         optuna_timeout = model_config.get("optuna_timeout", 3600)
+        optuna_storage_url = model_config.get(
+            "optuna_storage_url", "sqlite:///logs/optuna_study.db"
+        )
+        best_params_path = model_config.get("best_params_path", "logs/best_params.json")
+        cv_n_splits = get_cv_n_splits(cv_config)
 
-        # Prepare XGBoost parameters
-        xgb_params = {
-            "objective": model_config.get("objective", "reg:squarederror"),
-            "max_depth": model_config.get("max_depth", 6),
-            "learning_rate": model_config.get("learning_rate", 0.1),
-            "n_estimators": model_config.get("n_estimators", 200),
-            "subsample": model_config.get("subsample", 0.8),
-            "colsample_bytree": model_config.get("colsample_bytree", 0.8),
-            "random_state": model_config.get("random_state", 42),
-            "tree_method": model_config.get("tree_method", "hist"),
-            "device": model_config.get("device", "cpu"),
-            "n_jobs": model_config.get("n_jobs", -1),
-        }
+        # Prepare XGBoost parameters (strictly from model.params)
+        xgb_params = build_xgb_params(model_config)
 
         early_stopping_rounds = model_config.get("early_stopping_rounds")
         eval_metric = model_config.get("eval_metric")
@@ -218,12 +329,44 @@ def train_model(config_path: str, output_dir: str = None) -> dict:
             use_optuna=use_optuna,
             n_trials=n_trials,
             optuna_timeout=optuna_timeout,
+            best_params_path=best_params_path,
+            expected_context_hash=context_hash,
         )
 
-        # Train model on TRAINING DATA ONLY (using transformed target)
         eval_set = (
             [(X_val_processed, y_val_trans)] if X_val_processed is not None else None
         )
+        params_source = (
+            "best_params_file" if trainer.loaded_best_params else "config_model_params"
+        )
+        optuna_run_info = None
+
+        # Optional: Hyperparameter optimization, then retrain final model with best params
+        if use_optuna:
+            logger.info("Starting Optuna hyperparameter optimization...")
+            opt_results = trainer.optimize_hyperparameters(
+                X_train_processed,
+                y_train_trans,  # Training data only
+                cv=cv_n_splits,
+                study_name=study_name,
+                storage_url=optuna_storage_url,
+                best_params_output_path=best_params_path,
+                run_context=training_context,
+            )
+            logger.info(
+                "Optuna optimization completed: "
+                f"{opt_results['n_trials_before']} -> {opt_results['n_trials_after']} trials"
+            )
+            params_source = "optuna_best"
+            optuna_run_info = {
+                "study_name": opt_results["study_name"],
+                "storage_url": opt_results["storage_url"],
+                "n_trials_before": opt_results["n_trials_before"],
+                "n_trials_after": opt_results["n_trials_after"],
+                "best_score": opt_results["best_score"],
+                "best_params": opt_results["best_params"],
+            }
+
         model = trainer.train(
             X_train_processed,
             y_train_trans,
@@ -231,26 +374,14 @@ def train_model(config_path: str, output_dir: str = None) -> dict:
             early_stopping_rounds=early_stopping_rounds,
             eval_metric=eval_metric,
         )
-        logger.info(f"Model training completed on ln({target_column}) target")
-
-        # Optional: Hyperparameter optimization (uses training data only)
-        if use_optuna:
-            logger.info("Starting Optuna hyperparameter optimization...")
-            opt_results = trainer.optimize_hyperparameters(
-                X_train_processed,
-                y_train_trans,  # Training data only
-                cv=cv_config.get("n_splits", 5),
-            )
-            logger.info(
-                f"Optuna optimization completed: {opt_results['n_trials']} trials"
-            )
+        logger.info(f"Final model training completed on ln({target_column}) target")
 
         # Step 5: Cross-validation on training data only
         logger.info("\nStep 5: Performing cross-validation on training data...")
         cv_results = trainer.cross_validate(
             X_train_processed,
             y_train_trans,  # Training data only
-            cv=cv_config.get("n_folds", 5),
+            cv=cv_n_splits,
         )
         logger.info(
             f"Cross-validation RMSE: {cv_results['mean_cv_score']:.4f} (+/- {cv_results['std_cv_score']:.4f})"
@@ -368,6 +499,11 @@ def train_model(config_path: str, output_dir: str = None) -> dict:
         # Save model with metadata
         metadata = {
             "config": config,
+            "context_hash": context_hash,
+            "training_context": training_context,
+            "params_source": params_source,
+            "final_model_params": trainer.params.copy(),
+            "optuna_run_info": optuna_run_info,
             "target_transform": {
                 "enabled": target_transform_type is not None,
                 "type": target_transform_type,
@@ -424,6 +560,10 @@ def train_model(config_path: str, output_dir: str = None) -> dict:
             {
                 "model_name": "xgboost_model",
                 "timestamp": pd.Timestamp.now().isoformat(),
+                "context_hash": context_hash,
+                "params_source": params_source,
+                "final_model_params": trainer.params.copy(),
+                "optuna_run_info": optuna_run_info,
                 "target_transform": {
                     "enabled": target_transform_type is not None,
                     "type": target_transform_type,
@@ -490,6 +630,9 @@ def train_model(config_path: str, output_dir: str = None) -> dict:
         return {
             "model": model,
             "preprocessor": preprocessor,
+            "params_source": params_source,
+            "final_model_params": trainer.params.copy(),
+            "context_hash": context_hash,
             "train_metrics": train_metrics,
             "test_metrics": test_metrics,
             "train_metrics_trans": train_metrics_trans,

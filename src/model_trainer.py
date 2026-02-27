@@ -7,10 +7,9 @@ This module handles XGBoost model training, cross-validation, and hyperparameter
 import xgboost as xgb
 import numpy as np
 import pandas as pd
-from typing import Dict, Tuple, Optional, List, Any, Callable, cast
+from typing import Dict, Tuple, Optional, List, Any, cast
 from sklearn.model_selection import KFold, cross_val_score
 from sklearn.metrics import make_scorer, mean_squared_error
-import optuna
 from optuna.trial import Trial
 import time
 import json
@@ -35,6 +34,8 @@ class ModelTrainer:
         use_optuna: bool = False,
         n_trials: int = 100,
         optuna_timeout: int = 3600,
+        best_params_path: str = "logs/best_params.json",
+        expected_context_hash: Optional[str] = None,
     ):
         """
         Initialize ModelTrainer.
@@ -44,19 +45,28 @@ class ModelTrainer:
             use_optuna: Whether to use Optuna for hyperparameter optimization
             n_trials: Number of Optuna trials for hyperparameter optimization
             optuna_timeout: Timeout for Optuna optimization in seconds
+            best_params_path: Path to persisted best parameters JSON
+            expected_context_hash: Expected training context hash for safe parameter reuse
         """
         self.params = params or self._get_default_params()
         self.use_optuna = use_optuna
         self.n_trials = n_trials
         self.optuna_timeout = optuna_timeout
+        self.best_params_path = best_params_path
+        self.expected_context_hash = expected_context_hash
+        self.loaded_best_params = False
         self.model: Optional[xgb.XGBRegressor] = None
         self.training_history = []
 
         # Auto-load best parameters if use_optuna is False
         if not self.use_optuna:
-            loaded_params = load_best_params()
+            loaded_params = load_best_params(
+                input_path=self.best_params_path,
+                expected_context_hash=self.expected_context_hash,
+            )
             if loaded_params is not None:
                 self.params.update(loaded_params)
+                self.loaded_best_params = True
                 logger.info("Using loaded best parameters for training")
 
         logger.info(f"ModelTrainer initialized with use_optuna={use_optuna}")
@@ -246,7 +256,15 @@ class ModelTrainer:
         return results
 
     def optimize_hyperparameters(
-        self, X: pd.DataFrame, y: pd.Series, cv: int = 5, n_trials: Optional[int] = None
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        cv: int = 5,
+        n_trials: Optional[int] = None,
+        study_name: str = "xgboost_optimization",
+        storage_url: str = "sqlite:///logs/optuna_study.db",
+        best_params_output_path: str = "logs/best_params.json",
+        run_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Optimize hyperparameters using Optuna.
@@ -256,6 +274,10 @@ class ModelTrainer:
             y: Target Series
             cv: Number of folds for cross-validation
             n_trials: Number of optimization trials (uses instance default if None)
+            study_name: Optuna study name
+            storage_url: Optuna storage URL
+            best_params_output_path: Output path for best parameters snapshot
+            run_context: Optional context metadata (context_hash, data_file, etc.)
 
         Returns:
             Dictionary with optimization results
@@ -284,51 +306,31 @@ class ModelTrainer:
         # Create logs directory if it doesn't exist
         Path("logs").mkdir(parents=True, exist_ok=True)
 
+        context_hash = run_context.get("context_hash") if run_context else None
+        data_file = run_context.get("data_file") if run_context else None
+
         # Define objective function for Optuna
         def objective(trial: Trial) -> float:
-            # Stage 1: Mild regularization to reduce overfitting
-            # Target: Reduce test COV from 0.134 to < 0.10
-            # Strategy: Slightly reduce model capacity, moderate regularization
+            # Search space tuned for larger dataset with long-tail target distribution.
             params = {
-                "objective": "reg:squarederror",
-                # max_depth: MILDLY REDUCED to address overfitting (RMSE ratio = 1.89)
-                # Original: 4-9  →  Stage 1: 3-6
-                "max_depth": trial.suggest_int("max_depth", 3, 6),
-                # learning_rate: LOWERED for more stable convergence
-                # Original: 0.01-0.15  →  Stage 1: 0.03-0.12
+                "objective": self.params.get("objective", "reg:squarederror"),
+                "max_depth": trial.suggest_int("max_depth", 3, 8),
                 "learning_rate": trial.suggest_float(
-                    "learning_rate", 0.03, 0.12, log=True
+                    "learning_rate", 0.015, 0.12, log=True
                 ),
-                # n_estimators: INCREASED to compensate for lower learning rate
-                # Original: 300-1000  →  Stage 1: 400-1200
-                "n_estimators": trial.suggest_int("n_estimators", 400, 1200),
-                # subsample: MODERATELY REDUCED to increase randomness
-                # Original: 0.7-0.95  →  Stage 1: 0.6-0.9
-                "subsample": trial.suggest_float("subsample", 0.6, 0.9),
-                # colsample_bytree: MODERATELY REDUCED for feature sampling
-                # Original: 0.7-0.95  →  Stage 1: 0.6-0.9
-                "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 0.9),
-                # min_child_weight: MILDLY INCREASED to prevent noise fitting
-                # Original: 2-15  →  Stage 1: 5-20
-                "min_child_weight": trial.suggest_int("min_child_weight", 5, 20),
-                # reg_alpha: MODERATELY INCREASED L1 regularization
-                # Original: 0.05-1.5  →  Stage 1: 0.1-2.0
-                "reg_alpha": trial.suggest_float("reg_alpha", 0.1, 2.0, log=True),
-                # reg_lambda: MAINTAINED L2 regularization
-                # Original: 0.5-5.0  →  Stage 1: 0.5-5.0
-                "reg_lambda": trial.suggest_float("reg_lambda", 0.5, 5.0, log=True),
-                # gamma: MAINTAINED minimum loss reduction
-                # Original: 0.01-0.3  →  Stage 1: 0.01-0.3
-                "gamma": trial.suggest_float("gamma", 0.01, 0.3),
+                "n_estimators": trial.suggest_int("n_estimators", 800, 4000),
+                "subsample": trial.suggest_float("subsample", 0.6, 0.95),
+                "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 0.95),
+                "min_child_weight": trial.suggest_int("min_child_weight", 4, 30),
+                "reg_alpha": trial.suggest_float("reg_alpha", 1e-3, 10.0, log=True),
+                "reg_lambda": trial.suggest_float("reg_lambda", 1e-2, 30.0, log=True),
+                "gamma": trial.suggest_float("gamma", 1e-4, 1.0, log=True),
                 # Fixed parameters
                 "random_state": self.params.get("random_state", 42),
-                "tree_method": "hist",
+                "tree_method": self.params.get("tree_method", "hist"),
                 "device": self.params.get("device", "cpu"),
                 "n_jobs": self.params.get("n_jobs", -1),
             }
-
-            # Create and evaluate model
-            model = xgb.XGBRegressor(**params)
 
             # Use cross-validation for evaluation
             kf = KFold(
@@ -355,16 +357,18 @@ class ModelTrainer:
         # Create Optuna study with persistent storage
         study = optuna.create_study(
             direction="minimize",
-            study_name="xgboost_optimization",
-            storage="sqlite:///logs/optuna_study.db",
+            study_name=study_name,
+            storage=storage_url,
             load_if_exists=True,
         )
+        n_trials_before = len(study.trials)
 
         # Run optimization
         start_time = time.time()
         objective_fn = cast(Any, objective)
         study.optimize(objective_fn, n_trials=n_trials, timeout=self.optuna_timeout)
         opt_time = time.time() - start_time
+        n_trials_after = len(study.trials)
 
         # Get best parameters
         best_params = study.best_params
@@ -380,7 +384,12 @@ class ModelTrainer:
             best_params=best_params,
             best_score=best_score,
             trial_number=best_trial.number,
-            n_trials=len(study.trials),
+            n_trials=n_trials_after,
+            output_path=best_params_output_path,
+            context_hash=context_hash,
+            data_file=data_file,
+            study_name=study_name,
+            storage_url=storage_url,
         )
 
         # Update model parameters with best found parameters
@@ -391,8 +400,12 @@ class ModelTrainer:
         results = {
             "best_params": best_params,
             "best_score": best_score,
-            "n_trials": len(study.trials),
+            "n_trials_before": n_trials_before,
+            "n_trials_after": n_trials_after,
+            "n_trials": n_trials_after,
             "optimization_time": opt_time,
+            "study_name": study_name,
+            "storage_url": storage_url,
             "study": study,
         }
 

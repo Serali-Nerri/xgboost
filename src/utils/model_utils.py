@@ -351,7 +351,11 @@ def save_best_params(
     best_score: float,
     trial_number: int,
     n_trials: int,
-    output_path: str = 'logs/best_params.json'
+    output_path: str = 'logs/best_params.json',
+    context_hash: Optional[str] = None,
+    data_file: Optional[str] = None,
+    study_name: Optional[str] = None,
+    storage_url: Optional[str] = None,
 ) -> None:
     """
     Save best Optuna parameters to JSON file.
@@ -362,6 +366,10 @@ def save_best_params(
         trial_number: Trial number that achieved the best score
         n_trials: Total number of trials run
         output_path: Output file path (default: logs/best_params.json)
+        context_hash: Hash of data/config context for safe reuse
+        data_file: Absolute data file path used for optimization
+        study_name: Optuna study name
+        storage_url: Optuna storage URL
     """
     from datetime import datetime
 
@@ -370,7 +378,11 @@ def save_best_params(
         'best_rmse': best_score,
         'parameters': best_params,
         'timestamp': datetime.now().isoformat(),
-        'n_trials_total': n_trials
+        'n_trials_total': n_trials,
+        'context_hash': context_hash,
+        'data_file': data_file,
+        'study_name': study_name,
+        'storage_url': storage_url,
     }
 
     # Create directory if it doesn't exist
@@ -383,15 +395,19 @@ def save_best_params(
     logger.info(f"  Best RMSE: {best_score:.4f} (Trial {trial_number})")
 
 
-def load_best_params(input_path: str = 'logs/best_params.json') -> Optional[dict]:
+def load_best_params(
+    input_path: str = 'logs/best_params.json',
+    expected_context_hash: Optional[str] = None,
+) -> Optional[dict]:
     """
     Load best Optuna parameters from JSON file.
 
     Args:
         input_path: Path to best parameters file (default: logs/best_params.json)
+        expected_context_hash: Expected context hash for strict compatibility check
 
     Returns:
-        Dictionary of best parameters, or None if file doesn't exist
+        Dictionary of best parameters, or None if file doesn't exist or context mismatch
 
     Note:
         Returns None if file doesn't exist (first run without Optuna).
@@ -404,9 +420,34 @@ def load_best_params(input_path: str = 'logs/best_params.json') -> Optional[dict
     with open(path, 'r') as f:
         data = json.load(f)
 
+    if 'parameters' not in data or not isinstance(data['parameters'], dict):
+        logger.warning(f"Invalid best parameters file format at {input_path}")
+        return None
+
+    saved_context_hash = data.get('context_hash')
+    if expected_context_hash is not None:
+        if saved_context_hash is None:
+            logger.warning(
+                "Saved best parameters do not include context_hash; ignoring to avoid cross-dataset reuse"
+            )
+            return None
+        if saved_context_hash != expected_context_hash:
+            logger.warning(
+                "Saved best parameters context hash mismatch "
+                f"(expected={expected_context_hash}, found={saved_context_hash}); ignoring"
+            )
+            return None
+
     logger.info(f"Loaded best parameters from {input_path}")
-    logger.info(f"  Best RMSE: {data['best_rmse']:.4f} (Trial {data['trial_number']})")
-    logger.info(f"  Saved on: {data['timestamp']}")
-    logger.info(f"  Total trials: {data['n_trials_total']}")
+    if 'best_rmse' in data and 'trial_number' in data:
+        logger.info(f"  Best RMSE: {data['best_rmse']:.4f} (Trial {data['trial_number']})")
+    if 'timestamp' in data:
+        logger.info(f"  Saved on: {data['timestamp']}")
+    if 'n_trials_total' in data:
+        logger.info(f"  Total trials: {data['n_trials_total']}")
+    if saved_context_hash:
+        logger.info(f"  Context hash: {saved_context_hash}")
+    if data.get('study_name'):
+        logger.info(f"  Study name: {data['study_name']}")
 
     return data['parameters']

@@ -31,48 +31,38 @@ data:
 
 # XGBoost model parameters
 model:
-  # XGBoost hyperparameters - Stage 1 Baseline
-  # Mild regularization to reduce overfitting (RMSE ratio = 1.89)
-  # Target: Reduce test COV from 0.134 to < 0.10
+  # XGBoost hyperparameters - baseline center point
+  # These are now the single source of truth used by train.py.
   params:
     # Learning objective
     objective: "reg:squarederror"
 
-    # Maximum depth of trees - MILDLY REDUCED from 4
-    # Stage 1 search space: 3-6
-    max_depth: 4
+    # Maximum depth of trees
+    max_depth: 5
 
-    # Learning rate - LOWERED for more stable convergence
-    # Stage 1 search space: 0.03-0.12
-    learning_rate: 0.06
+    # Learning rate
+    learning_rate: 0.05
 
-    # Number of boosting rounds - INCREASED to compensate for lower learning rate
-    # Stage 1 search space: 400-1200
-    n_estimators: 600
+    # Number of boosting rounds
+    n_estimators: 1200
 
-    # Subsample ratio - MODERATELY REDUCED to increase randomness
-    # Stage 1 search space: 0.6-0.9
-    subsample: 0.75
+    # Row subsampling
+    subsample: 0.8
 
-    # Subsample ratio of columns - MODERATELY REDUCED for feature sampling
-    # Stage 1 search space: 0.6-0.9
+    # Column subsampling
     colsample_bytree: 0.75
 
-    # Minimum child weight - MILDLY INCREASED to prevent noise fitting
-    # Stage 1 search space: 5-20
+    # Minimum child weight
     min_child_weight: 10
 
-    # L1 regularization - MODERATELY INCREASED
-    # Stage 1 search space: 0.1-2.0
-    reg_alpha: 0.8
+    # L1 regularization
+    reg_alpha: 0.5
 
-    # L2 regularization - MAINTAINED
-    # Stage 1 search space: 0.5-5.0
+    # L2 regularization
     reg_lambda: 2.0
 
-    # Minimum loss reduction - MAINTAINED
-    # Stage 1 search space: 0.01-0.3
-    gamma: 0.1
+    # Minimum loss reduction
+    gamma: 0.05
 
     # Random seed
     random_state: 42
@@ -86,25 +76,30 @@ model:
     # Number of parallel threads
     n_jobs: -1
 
-  # Optuna hyperparameter optimization - ENABLED for Stage 1
-  # See plan/optimization_roadmap.md for details
+  # Optuna hyperparameter optimization switch
   use_optuna: true
 
   # Number of Optuna trials
-  n_trials: 300
+  n_trials: 400
 
   # Optuna timeout (seconds)
-  optuna_timeout: 7200  # 2 hours
+  optuna_timeout: 14400  # 4 hours
+
+  # Optuna storage URL
+  optuna_storage_url: "sqlite:///logs/optuna_study.db"
+
+  # Best params output path
+  best_params_path: "logs/best_params.json"
 
   # Early stopping configuration (requires validation split)
-  early_stopping_rounds: 50
+  early_stopping_rounds: 100
 
   # Evaluation metric for validation monitoring
   eval_metric: "rmse"
 
   # Validation set split from training data (for early stopping)
   # Set to 0 to disable validation split
-  validation_size: 0.1
+  validation_size: 0.15
 
 # Cross-validation configuration
 cv:
