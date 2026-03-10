@@ -356,6 +356,7 @@ def save_best_params(
     data_file: Optional[str] = None,
     study_name: Optional[str] = None,
     storage_url: Optional[str] = None,
+    score_label: str = 'best_rmse',
 ) -> None:
     """
     Save best Optuna parameters to JSON file.
@@ -370,12 +371,14 @@ def save_best_params(
         data_file: Absolute data file path used for optimization
         study_name: Optuna study name
         storage_url: Optuna storage URL
+        score_label: Field name used to persist the best score
     """
     from datetime import datetime
 
     data = {
         'trial_number': trial_number,
-        'best_rmse': best_score,
+        score_label: best_score,
+        'best_score': best_score,
         'parameters': best_params,
         'timestamp': datetime.now().isoformat(),
         'n_trials_total': n_trials,
@@ -392,7 +395,7 @@ def save_best_params(
         json.dump(data, f, indent=2)
 
     logger.info(f"Best parameters saved to {output_path}")
-    logger.info(f"  Best RMSE: {best_score:.4f} (Trial {trial_number})")
+    logger.info(f"  Best score ({score_label}): {best_score:.4f} (Trial {trial_number})")
 
 
 def load_best_params(
@@ -439,7 +442,9 @@ def load_best_params(
             return None
 
     logger.info(f"Loaded best parameters from {input_path}")
-    if 'best_rmse' in data and 'trial_number' in data:
+    if 'best_score' in data and 'trial_number' in data:
+        logger.info(f"  Best score: {data['best_score']:.4f} (Trial {data['trial_number']})")
+    elif 'best_rmse' in data and 'trial_number' in data:
         logger.info(f"  Best RMSE: {data['best_rmse']:.4f} (Trial {data['trial_number']})")
     if 'timestamp' in data:
         logger.info(f"  Saved on: {data['timestamp']}")

@@ -28,6 +28,11 @@ import pandas as pd
 import numpy as np
 from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
 
+from src.domain_features import (
+    get_training_target_name,
+    normalize_target_mode,
+    restore_report_target,
+)
 from src.utils.logger import setup_logger
 from src.data_loader import DataLoader
 from src.preprocessor import Preprocessor
@@ -91,9 +96,11 @@ def _file_sha256(file_path: str) -> str:
 def build_training_context(
     data_file_path: str,
     target_column: str,
+    target_mode: str,
     target_transform_type: Optional[str],
     columns_to_drop: List[str],
     optuna_metric_space: str,
+    selection_objective: Dict[str, Any],
     split_strategy: str,
     split_config: Dict[str, Any],
     validation_size: float,
@@ -108,9 +115,11 @@ def build_training_context(
         "data_file": str(Path(data_file_path).resolve()),
         "data_sha256": data_sha256,
         "target_column": target_column,
+        "target_mode": target_mode,
         "target_transform_type": target_transform_type or "none",
         "columns_to_drop": sorted(columns_to_drop),
         "optuna_metric_space": optuna_metric_space,
+        "selection_objective": selection_objective,
         "split_strategy": split_strategy,
         "split_config": split_config,
         "validation_size": validation_size,
@@ -136,6 +145,8 @@ def build_optuna_tuning_fingerprint(
     model_params: Dict[str, Any],
     cv_config: Dict[str, Any],
     optuna_metric_space: str,
+    target_mode: str,
+    selection_objective: Dict[str, Any],
     split_strategy: str,
     split_config: Dict[str, Any],
     validation_size: float,
@@ -146,6 +157,8 @@ def build_optuna_tuning_fingerprint(
     fingerprint_payload = {
         "search_space_version": OPTUNA_SEARCH_SPACE_VERSION,
         "optuna_metric_space": optuna_metric_space,
+        "target_mode": target_mode,
+        "selection_objective": selection_objective,
         "split_strategy": split_strategy,
         "split_config": split_config,
         "validation_size": validation_size,
@@ -214,34 +227,70 @@ def get_cv_n_splits(cv_config: Dict[str, Any]) -> int:
 
 
 def format_target_space_description(
-    target_column: str, target_transform_type: Optional[str]
+    report_target_column: str,
+    target_mode: str,
+    target_transform_type: Optional[str],
 ) -> str:
     """Describe the target space used by fitting and reporting."""
+    target_name = get_training_target_name(report_target_column, target_mode)
     if target_transform_type == "log":
-        return f"ln({target_column}) -> exp() -> {target_column}"
+        return f"ln({target_name}) -> inverse -> {report_target_column}"
     if target_transform_type == "sqrt":
-        return f"sqrt({target_column}) -> square() -> {target_column}"
-    return target_column
+        return f"sqrt({target_name}) -> inverse -> {report_target_column}"
+    if target_name != report_target_column:
+        return f"{target_name} -> {report_target_column}"
+    return report_target_column
 
 
-def format_training_space_label(target_transform_type: Optional[str]) -> str:
+def format_training_space_label(
+    report_target_column: str,
+    target_mode: str,
+    target_transform_type: Optional[str],
+) -> str:
     """Human-readable label for the model output space."""
+    target_name = get_training_target_name(report_target_column, target_mode)
     if target_transform_type == "log":
-        return "ln space"
+        return f"ln({target_name}) space"
     if target_transform_type == "sqrt":
-        return "sqrt space"
-    return "original space"
+        return f"sqrt({target_name}) space"
+    return target_name
 
 
-def inverse_transform_predictions(
-    predictions: np.ndarray, target_transform_type: Optional[str]
-) -> np.ndarray:
-    """Map model outputs back to the original target space."""
-    if target_transform_type == "log":
-        return np.exp(predictions)
-    if target_transform_type == "sqrt":
-        return np.square(predictions)
-    return predictions
+def build_target_metadata(
+    report_target_column: str,
+    target_mode: str,
+    target_transform_type: Optional[str],
+    derived_columns: List[str],
+) -> Dict[str, Any]:
+    """Build a consistent target metadata payload for saved artifacts."""
+    modeled_target_column = get_training_target_name(report_target_column, target_mode)
+    return {
+        "target_mode": target_mode,
+        "report_target_column": report_target_column,
+        "modeled_target_column": modeled_target_column,
+        "derived_columns": list(derived_columns),
+        "target_transform": {
+            "enabled": target_transform_type is not None,
+            "type": target_transform_type,
+            "mode": target_mode,
+            "original_column": report_target_column,
+            "modeled_column": modeled_target_column,
+            "derived_columns": list(derived_columns),
+        },
+    }
+
+
+def select_final_n_estimators(cv_results: Dict[str, Any], fallback: int) -> Tuple[int, List[int]]:
+    """Select a final tree count from CV best_iteration values."""
+    fold_details = cast(List[Dict[str, Any]], cv_results.get("fold_details", []))
+    best_iterations = [
+        int(detail["best_iteration"]) + 1
+        for detail in fold_details
+        if detail.get("best_iteration") is not None
+    ]
+    if not best_iterations:
+        return int(fallback), []
+    return int(np.median(np.asarray(best_iterations, dtype=int))), best_iterations
 
 
 def build_cv_splitter(
@@ -324,6 +373,8 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
         logger.info(f"Target column: {target_column}")
         logger.info(f"Columns to drop: {columns_to_drop}")
 
+        target_mode = normalize_target_mode(data_config.get("target_mode", "raw"))
+
         # Read target transform configuration
         target_transform_config = data_config.get("target_transform", {})
         target_transform_type = (
@@ -342,6 +393,10 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
         validation_size = float(model_config.get("validation_size", 0.1) or 0.0)
         early_stopping_rounds = model_config.get("early_stopping_rounds")
         eval_metric = model_config.get("eval_metric")
+        selection_objective_config = cast(
+            Dict[str, Any],
+            model_config.get("selection_objective", {}),
+        )
         split_strategy = get_split_strategy(split_config)
         regime_config = cast(
             Dict[str, Any], evaluation_config.get("regime_analysis", {})
@@ -349,6 +404,7 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
         logger.info(f"Optuna RMSE metric space: {optuna_metric_space}")
         logger.info(f"Cross-validation RMSE metric space: {cv_metric_space}")
         logger.info(f"Data split strategy: {split_strategy}")
+        logger.info(f"Target mode: {target_mode}")
 
         # Validate XGBoost params early so study naming matches the real tuning config.
         xgb_params = build_xgb_params(model_config)
@@ -356,9 +412,11 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
         training_context = build_training_context(
             data_file_path=data_path,
             target_column=target_column,
+            target_mode=target_mode,
             target_transform_type=target_transform_type,
             columns_to_drop=columns_to_drop,
             optuna_metric_space=optuna_metric_space,
+            selection_objective=selection_objective_config,
             split_strategy=split_strategy,
             split_config=split_config,
             validation_size=validation_size,
@@ -370,6 +428,8 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
             xgb_params,
             cv_config,
             optuna_metric_space,
+            target_mode,
+            selection_objective_config,
             split_strategy,
             split_config,
             validation_size,
@@ -389,13 +449,19 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
         data_loader = DataLoader(required_columns=[target_column])
 
         features, target_transformed = data_loader.load_data(
-            data_path, target_column, target_transform=target_transform_type
+            data_path,
+            target_column,
+            target_transform=target_transform_type,
+            target_mode=target_mode,
         )
 
-        # Save original target values (for inverse transform evaluation)
-        target_raw = data_loader.target_raw
-        if target_raw is None:
+        # Save report target and modeled target
+        report_target_raw = data_loader.target_raw
+        training_target_raw = data_loader.training_target_raw
+        if report_target_raw is None:
             raise ValueError("DataLoader did not preserve raw target values")
+        if training_target_raw is None:
+            raise ValueError("DataLoader did not preserve raw modeled target values")
 
         logger.info(
             f"Data loaded: {len(features)} samples, {len(features.columns)} features"
@@ -418,7 +484,7 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
             stratify_labels_candidate, stratification_metadata = (
                 build_regression_stratification_labels(
                     features=features,
-                    target_raw=target_raw,
+                    target_raw=training_target_raw,
                     split_config=split_config,
                     minimum_count=minimum_stratum_size,
                 )
@@ -453,11 +519,14 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
                     pd.Series,
                     pd.Series,
                     pd.Series,
+                    pd.Series,
+                    pd.Series,
                 ],
                 train_test_split(
                     features,
                     target_transformed,
-                    target_raw,
+                    report_target_raw,
+                    training_target_raw,
                     stratify_labels_full,
                     **split_kwargs,
                 ),
@@ -467,8 +536,10 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
                 X_test,
                 y_train_trans_full,
                 y_test_trans,
-                y_train_orig_full,
-                y_test_orig,
+                y_train_report_full,
+                y_test_report,
+                y_train_model_raw_full,
+                y_test_model_raw,
                 train_strata_full,
                 test_strata,
             ) = split_result
@@ -481,11 +552,14 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
                     pd.Series,
                     pd.Series,
                     pd.Series,
+                    pd.Series,
+                    pd.Series,
                 ],
                 train_test_split(
                     features,
                     target_transformed,
-                    target_raw,
+                    report_target_raw,
+                    training_target_raw,
                     **split_kwargs,
                 ),
             )
@@ -494,8 +568,10 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
                 X_test,
                 y_train_trans_full,
                 y_test_trans,
-                y_train_orig_full,
-                y_test_orig,
+                y_train_report_full,
+                y_test_report,
+                y_train_model_raw_full,
+                y_test_model_raw,
             ) = split_result
             train_strata_full = None
             test_strata = None
@@ -513,115 +589,8 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
         )
         logger.info(f"Test set: {len(X_test)} samples ({test_size * 100:.0f}%)")
 
-        # Step 2.6: Split training data into train/validation sets for early stopping
-        X_val_raw: Optional[pd.DataFrame] = None
-        y_val_trans: Optional[pd.Series] = None
-        if validation_size and validation_size > 0:
-            logger.info(
-                "\nStep 2.6: Splitting training data into train/validation sets..."
-            )
-            validation_split_kwargs: Dict[str, Any] = {
-                "test_size": validation_size,
-                "random_state": random_state,
-            }
-            if train_strata_full is not None:
-                validation_split_kwargs["stratify"] = train_strata_full
-                split_result = cast(
-                    Tuple[
-                        pd.DataFrame,
-                        pd.DataFrame,
-                        pd.Series,
-                        pd.Series,
-                        pd.Series,
-                        pd.Series,
-                        pd.Series,
-                        pd.Series,
-                    ],
-                    train_test_split(
-                        X_train_full,
-                        y_train_trans_full,
-                        y_train_orig_full,
-                        train_strata_full,
-                        **validation_split_kwargs,
-                    ),
-                )
-                (
-                    X_train,
-                    X_val_raw,
-                    y_train_trans,
-                    y_val_trans,
-                    _,
-                    _,
-                    _,
-                    val_strata,
-                ) = split_result
-            else:
-                split_result = cast(
-                    Tuple[
-                        pd.DataFrame,
-                        pd.DataFrame,
-                        pd.Series,
-                        pd.Series,
-                        pd.Series,
-                        pd.Series,
-                    ],
-                    train_test_split(
-                        X_train_full,
-                        y_train_trans_full,
-                        y_train_orig_full,
-                        **validation_split_kwargs,
-                    ),
-                )
-                (
-                    X_train,
-                    X_val_raw,
-                    y_train_trans,
-                    y_val_trans,
-                    _,
-                    _,
-                ) = split_result
-                val_strata = None
-            logger.info(
-                f"Training subset: {len(X_train)} samples ({(1 - validation_size) * 100:.0f}%)"
-            )
-            logger.info(
-                f"Validation set: {len(X_val_raw)} samples ({validation_size * 100:.0f}%)"
-            )
-        else:
-            X_train = X_train_full
-            y_train_trans = y_train_trans_full
-            val_strata = None
-
-        # Step 3: Preprocess data (FIT ON TRAINING DATA ONLY - CRITICAL FIX)
-        logger.info("\nStep 3: Preprocessing data...")
-        preprocessor = Preprocessor(columns_to_drop=columns_to_drop)
-        X_train_processed = preprocessor.fit_transform(X_train)
-        X_test_processed = preprocessor.transform(X_test)
-        X_val_processed = (
-            preprocessor.transform(X_val_raw) if X_val_raw is not None else None
-        )
-        logger.info(
-            f"Preprocessing completed: {len(X_train_processed.columns)} features remaining"
-        )
-
-        # Get remaining feature names
-        feature_names = preprocessor.get_remaining_features()
-        logger.info(f"Remaining features: {feature_names}")
-
-        # Check for missing values
-        missing_info_train = preprocessor.check_missing_values(X_train_processed)
-        missing_info_test = preprocessor.check_missing_values(X_test_processed)
-        if missing_info_train or missing_info_test:
-            logger.warning(
-                f"Found missing values - Train: {missing_info_train}, Test: {missing_info_test}"
-            )
-        else:
-            logger.info("No missing values found in train or test sets")
-
-        # Step 4: Train model
-        logger.info("\nStep 4: Training XGBoost model...")
-
-        # Initialize trainer with parameters
+        # Step 3: Prepare trainer for model selection and final refit
+        logger.info("\nStep 3: Preparing model selection and final retraining...")
         use_optuna = model_config.get("use_optuna", False)
         n_trials = model_config.get("n_trials", 100)
         optuna_timeout = model_config.get("optuna_timeout", 3600)
@@ -640,28 +609,26 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
             expected_context_hash=context_hash,
             optuna_metric_space=optuna_metric_space,
             target_transform_type=target_transform_type,
+            target_mode=target_mode,
             columns_to_drop=columns_to_drop,
             validation_size=validation_size,
             early_stopping_rounds=early_stopping_rounds,
             eval_metric=eval_metric,
+            selection_objective=selection_objective_config,
         )
 
-        eval_set = (
-            [(X_val_processed, y_val_trans)]
-            if X_val_processed is not None and y_val_trans is not None
-            else None
-        )
         params_source = (
             "best_params_file" if trainer.loaded_best_params else "config_model_params"
         )
         optuna_run_info = None
 
-        # Optional: Hyperparameter optimization, then retrain final model with best params
+        # Step 4: Optional hyperparameter optimization in CV
         if use_optuna:
             logger.info("Starting Optuna hyperparameter optimization...")
             opt_results = trainer.optimize_hyperparameters(
                 X_train_full,
                 y_train_trans_full,
+                y_report=y_train_report_full,
                 cv=cv_splitter,
                 study_name=study_name,
                 storage_url=optuna_storage_url,
@@ -682,40 +649,78 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
                 "best_score": opt_results["best_score"],
                 "metric_space": opt_results["metric_space"],
                 "target_transform_type": opt_results["target_transform_type"],
+                "target_mode": opt_results["target_mode"],
+                "selection_objective": opt_results["selection_objective"],
                 "best_params": opt_results["best_params"],
             }
 
-        model = trainer.train(
-            X_train_processed,
-            y_train_trans,
-            eval_set=eval_set,
-            early_stopping_rounds=early_stopping_rounds,
-            eval_metric=eval_metric,
-        )
-        logger.info(
-            "Final model training completed on target space: "
-            f"{format_target_space_description(target_column, target_transform_type)}"
-        )
-
-        # Step 5: Cross-validation on training data only
-        logger.info("\nStep 5: Performing cross-validation on training data...")
+        logger.info("\nStep 4.5: Performing cross-validation on training data...")
         cv_results = trainer.cross_validate(
             X_train_full,
             y_train_trans_full,
+            y_report=y_train_report_full,
             cv=cv_splitter,
             metric_space=cv_metric_space,
             target_transform_type=target_transform_type,
             stratify_labels=train_strata_full,
         )
         logger.info(
-            "Cross-validation RMSE "
+            "Cross-validation composite score "
             f"({cv_metric_space} space): {cv_results['mean_cv_score']:.4f} "
             f"(+/- {cv_results['std_cv_score']:.4f})"
+        )
+
+        final_n_estimators, fold_best_iterations = select_final_n_estimators(
+            cv_results,
+            fallback=int(trainer.params.get("n_estimators", xgb_params["n_estimators"])),
+        )
+        trainer.params["n_estimators"] = final_n_estimators
+        logger.info(
+            "Selected final n_estimators=%s from CV fold best_iteration values=%s",
+            final_n_estimators,
+            fold_best_iterations,
+        )
+
+        logger.info("\nStep 5: Fitting final model on full training split...")
+        preprocessor = Preprocessor(columns_to_drop=columns_to_drop)
+        X_train_processed = preprocessor.fit_transform(X_train_full)
+        X_test_processed = preprocessor.transform(X_test)
+        logger.info(
+            f"Preprocessing completed: {len(X_train_processed.columns)} features remaining"
+        )
+
+        feature_names = preprocessor.get_remaining_features()
+        logger.info(f"Remaining features: {feature_names}")
+
+        missing_info_train = preprocessor.check_missing_values(X_train_processed)
+        missing_info_test = preprocessor.check_missing_values(X_test_processed)
+        if missing_info_train or missing_info_test:
+            logger.warning(
+                f"Found missing values - Train: {missing_info_train}, Test: {missing_info_test}"
+            )
+        else:
+            logger.info("No missing values found in train or test sets")
+
+        model = trainer.train(
+            X_train_processed,
+            y_train_trans_full,
+            eval_set=None,
+            early_stopping_rounds=None,
+            eval_metric=None,
+        )
+        logger.info(
+            "Final model training completed on target space: "
+            f"{format_target_space_description(target_column, target_mode, target_transform_type)}"
         )
 
         # Step 6: Evaluate model on BOTH training and test sets
         logger.info("\nStep 6: Evaluating model...")
         evaluator = Evaluator()
+        regime_schema = evaluator.fit_regime_schema(
+            y_true=y_train_report_full,
+            features=X_train_full,
+            regime_config=regime_config,
+        )
 
         # Make predictions on BOTH sets (in transformed space)
         from src.predictor import Predictor
@@ -724,25 +729,26 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
         y_train_pred_trans = predictor.predict(X_train_full)
         y_test_pred_trans = predictor.predict(X_test)
 
-        # Apply inverse transform to get back to original space
-        y_train_pred_orig = inverse_transform_predictions(
-            y_train_pred_trans, target_transform_type
+        # Apply inverse transform + target-mode restoration to get back to report space
+        y_train_pred_orig = restore_report_target(
+            y_train_pred_trans,
+            target_mode=target_mode,
+            target_transform_type=target_transform_type,
+            reference_features=X_train_full,
         )
-        y_test_pred_orig = inverse_transform_predictions(
-            y_test_pred_trans, target_transform_type
+        y_test_pred_orig = restore_report_target(
+            y_test_pred_trans,
+            target_mode=target_mode,
+            target_transform_type=target_transform_type,
+            reference_features=X_test,
         )
-        if target_transform_type == "log":
-            logger.info("Applied exp() inverse transform to predictions")
-        elif target_transform_type == "sqrt":
-            logger.info("Applied square() inverse transform to predictions")
-        else:
-            logger.info("Predictions already in original target space")
+        logger.info("Mapped model outputs back to reported target space")
 
         # Calculate metrics in ORIGINAL space (recommended - true application scenario)
         train_metrics = evaluator.calculate_metrics(
-            y_train_orig_full, y_train_pred_orig
+            y_train_report_full, y_train_pred_orig
         )
-        test_metrics = evaluator.calculate_metrics(y_test_orig, y_test_pred_orig)
+        test_metrics = evaluator.calculate_metrics(y_test_report, y_test_pred_orig)
 
         # Also calculate metrics in transformed space (for reference)
         train_metrics_trans = evaluator.calculate_metrics(
@@ -752,16 +758,16 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
             y_test_trans, y_test_pred_trans
         )
         train_regime_metrics = evaluator.calculate_regime_metrics(
-            y_true=y_train_orig_full,
+            y_true=y_train_report_full,
             y_pred=y_train_pred_orig,
             features=X_train_full,
-            regime_config=regime_config,
+            regime_schema=regime_schema,
         )
         test_regime_metrics = evaluator.calculate_regime_metrics(
-            y_true=y_test_orig,
+            y_true=y_test_report,
             y_pred=y_test_pred_orig,
             features=X_test,
-            regime_config=regime_config,
+            regime_schema=regime_schema,
         )
 
         # Log original space metrics (PRIMARY)
@@ -794,7 +800,11 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
                     )
 
         # Log transformed space metrics (REFERENCE)
-        training_space_label = format_training_space_label(target_transform_type)
+        training_space_label = format_training_space_label(
+            target_column,
+            target_mode,
+            target_transform_type,
+        )
         logger.info(f"\n--- Training Space Metrics (Reference) ---")
         logger.info(
             f"Training RMSE ({training_space_label}): {train_metrics_trans['rmse']:.4f}"
@@ -830,7 +840,7 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
 
         # Training set plots (using original space for interpretability)
         create_evaluation_dashboard(
-            y_train_orig_full,
+            y_train_report_full,
             y_train_pred_orig,
             model,
             feature_names,
@@ -840,7 +850,7 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
 
         # Test set plots (PRIMARY - shows true generalization)
         create_evaluation_dashboard(
-            y_test_orig,
+            y_test_report,
             y_test_pred_orig,
             model,
             feature_names,
@@ -854,6 +864,12 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
 
         # Step 8: Save model and artifacts
         logger.info("\nStep 8: Saving model and artifacts...")
+        target_metadata = build_target_metadata(
+            report_target_column=target_column,
+            target_mode=target_mode,
+            target_transform_type=target_transform_type,
+            derived_columns=data_loader.derived_columns,
+        )
 
         # Save model with metadata
         metadata = {
@@ -865,18 +881,23 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
             "optuna_run_info": optuna_run_info,
             "optuna_metric_space": optuna_metric_space,
             "cv_metric_space": cv_metric_space,
-            "target_transform": {
-                "enabled": target_transform_type is not None,
-                "type": target_transform_type,
-                "original_column": target_column,
-            },
+            "selection_objective": trainer.selection_objective,
+            **target_metadata,
             "split_strategy_requested": split_strategy,
             "split_strategy_effective": effective_split_strategy,
             "stratification_metadata": stratification_metadata,
-            "train_metrics_original_space": train_metrics,  # PRIMARY
+            "selection_metrics_cv": {
+                "composite_objective": cv_results["mean_cv_score"],
+                "rmse": cv_results.get("mean_cv_rmse"),
+                "r2": cv_results.get("mean_cv_r2"),
+                "cov": cv_results.get("mean_cv_cov"),
+            },
+            "train_metrics_original_space": train_metrics,  # LEGACY
+            "train_full_apparent_metrics_original_space": train_metrics,  # PRIMARY
             "test_metrics_original_space": test_metrics,  # PRIMARY
             "train_metrics_transformed_space": train_metrics_trans,  # REFERENCE
             "test_metrics_transformed_space": test_metrics_trans,  # REFERENCE
+            "regime_schema": regime_schema,
             "train_regime_metrics_original_space": train_regime_metrics,
             "test_regime_metrics_original_space": test_regime_metrics,
             "cross_validation_results": cv_results,
@@ -885,8 +906,10 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
             "n_test_samples": len(X_test),
             "n_features": len(feature_names),
             "test_size": test_size,
-            "n_train_fit_samples": len(X_train),
-            "n_validation_samples": len(X_val_raw) if X_val_raw is not None else 0,
+            "n_train_fit_samples": len(X_train_full),
+            "n_validation_samples": 0,
+            "final_n_estimators_from_cv": final_n_estimators,
+            "fold_best_iterations": fold_best_iterations,
             "training_successful": True,
             "overfitting_check": {
                 "rmse_ratio_original": test_metrics["rmse"] / train_metrics["rmse"],
@@ -932,18 +955,23 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
                 "optuna_run_info": optuna_run_info,
                 "optuna_metric_space": optuna_metric_space,
                 "cv_metric_space": cv_metric_space,
-                "target_transform": {
-                    "enabled": target_transform_type is not None,
-                    "type": target_transform_type,
-                    "original_column": target_column,
-                },
+                "selection_objective": trainer.selection_objective,
+                **target_metadata,
                 "split_strategy_requested": split_strategy,
                 "split_strategy_effective": effective_split_strategy,
                 "stratification_metadata": stratification_metadata,
-                "train_metrics_original_space": train_metrics,  # PRIMARY
+                "selection_metrics_cv": {
+                    "composite_objective": cv_results["mean_cv_score"],
+                    "rmse": cv_results.get("mean_cv_rmse"),
+                    "r2": cv_results.get("mean_cv_r2"),
+                    "cov": cv_results.get("mean_cv_cov"),
+                },
+                "train_metrics_original_space": train_metrics,  # LEGACY
+                "train_full_apparent_metrics_original_space": train_metrics,  # PRIMARY
                 "test_metrics_original_space": test_metrics,  # PRIMARY
                 "train_metrics_transformed_space": train_metrics_trans,  # REFERENCE
                 "test_metrics_transformed_space": test_metrics_trans,  # REFERENCE
+                "regime_schema": regime_schema,
                 "train_regime_metrics_original_space": train_regime_metrics,
                 "test_regime_metrics_original_space": test_regime_metrics,
                 "cv_results": serializable_cv_results,
@@ -951,8 +979,8 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
                     "n_train": len(X_train_full),
                     "n_test": len(X_test),
                     "test_size": test_size,
-                    "n_train_fit": len(X_train),
-                    "n_validation": len(X_val_raw) if X_val_raw is not None else 0,
+                    "n_train_fit": len(X_train_full),
+                    "n_validation": 0,
                     "n_strata_train": int(train_strata_full.nunique())
                     if train_strata_full is not None
                     else None,
@@ -960,6 +988,8 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
                     if test_strata is not None
                     else None,
                 },
+                "final_n_estimators_from_cv": final_n_estimators,
+                "fold_best_iterations": fold_best_iterations,
                 "overfitting_analysis": {
                     "rmse_ratio_original": test_metrics["rmse"] / train_metrics["rmse"],
                     "rmse_ratio_transformed": test_metrics_trans["rmse"]
@@ -986,7 +1016,7 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
         logger.info("PERFORMANCE SUMMARY")
         logger.info("=" * 80)
         logger.info(
-            f"Target: {format_target_space_description(target_column, target_transform_type)}"
+            f"Target: {format_target_space_description(target_column, target_mode, target_transform_type)}"
         )
         logger.info(f"")
         logger.info(f"Original Space (Primary):")
@@ -997,7 +1027,11 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
             f"  Test:     RMSE={test_metrics['rmse']:.4f} kN, R²={test_metrics['r2']:.4f}, COV={test_metrics.get('cov', 'N/A')}"
         )
         logger.info(
-            f"  CV ({cv_metric_space}): RMSE={-cv_results['mean_cv_score']:.4f}"
+            "  CV: "
+            f"J={cv_results['mean_cv_score']:.4f}, "
+            f"RMSE={(cv_results.get('mean_cv_rmse') if cv_results.get('mean_cv_rmse') is not None else float('nan')):.4f}, "
+            f"R²={(cv_results.get('mean_cv_r2') if cv_results.get('mean_cv_r2') is not None else float('nan')):.4f}, "
+            f"COV={(cv_results.get('mean_cv_cov') if cv_results.get('mean_cv_cov') is not None else float('nan')):.4f}"
         )
         logger.info(f"")
         logger.info(f"Training Space (Reference):")
@@ -1036,6 +1070,7 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
             "train_regime_metrics": train_regime_metrics,
             "test_regime_metrics": test_regime_metrics,
             "target_transform_type": target_transform_type,
+            "target_mode": target_mode,
             "cv_results": cv_results,
             "feature_names": feature_names,
             "output_dir": output_dir,

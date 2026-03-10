@@ -3,10 +3,11 @@
 data:
   file_path: "data/processed/2026.3.9-11864_feature_parameters_raw.csv"
   target_column: "Nexp (kN)"
+  target_mode: "psi_over_npl"
 
   target_transform:
-    enabled: false
-    type: "none"
+    enabled: true
+    type: "log"
 
   columns_to_drop:
     - "b (mm)"
@@ -14,7 +15,7 @@ data:
     - "r0 (mm)"
     - "t (mm)"
     - "L (mm)"
-    - "lambda"
+    - "Npl (kN)"
 
   test_size: 0.2
   random_state: 42
@@ -23,24 +24,22 @@ data:
     strategy: "regression_stratified"
     target_bins: 10
     auxiliary_features:
-      - column: "Ac (mm^2)"
-        bins: 3
-      - column: "lambda"
+      - column: "lambda_bar"
         bins: 3
     min_stratum_size: 12
 
 model:
   params:
     objective: "reg:squarederror"
-    max_depth: 6
-    learning_rate: 0.0772553931443418
-    n_estimators: 2882
-    subsample: 0.730999760277189
-    colsample_bytree: 0.5359526434696961
-    min_child_weight: 13
-    reg_alpha: 0.6063786538652424
-    reg_lambda: 0.10815768560820926
-    gamma: 0.010383141061981991
+    max_depth: 5
+    learning_rate: 0.04
+    n_estimators: 4200
+    subsample: 0.67
+    colsample_bytree: 0.52
+    min_child_weight: 6
+    reg_alpha: 0.03
+    reg_lambda: 0.08
+    gamma: 0.001
     random_state: 42
     tree_method: "hist"
     device: "cpu"
@@ -52,11 +51,18 @@ model:
   n_trials: 200
   optuna_timeout: 14400
   optuna_storage_url: "sqlite:///logs/optuna_study.db"
-  best_params_path: "logs/best_params_raw_stratified_original_200.json"
+  best_params_path: "logs/best_params_psi_over_npl_log_original_200.json"
 
   early_stopping_rounds: 100
   eval_metric: "rmse"
   validation_size: 0.15
+  selection_objective:
+    metric_space: "original_nexp"
+    rmse_normalizer: "mean_actual"
+    cov_threshold: 0.10
+    r2_threshold: 0.99
+    cov_weight: 2.0
+    r2_weight: 2.0
 
 cv:
   n_splits: 5
@@ -66,21 +72,44 @@ cv:
 evaluation:
   regime_analysis:
     enabled: true
+    reference_split: "train"
+    sort_metric: "cov"
     regimes:
-      - name: "capacity"
-        source: "target"
+      - name: "axiality"
+        mode: "categorical"
+        source: "feature"
+        column: "axial_flag"
+      - name: "section_family"
+        mode: "categorical"
+        source: "feature"
+        column: "section_family"
+      - name: "slenderness_state"
+        mode: "fixed_bins"
+        source: "feature"
+        column: "lambda_bar"
+        edges: [0.0, 0.25, 0.5, 1.0, .inf]
+        labels: ["very_stocky", "stocky", "intermediate", "slender"]
+      - name: "scale_npl"
+        mode: "train_quantile"
+        source: "feature"
+        column: "Npl (kN)"
         bins: 5
-      - name: "section_area"
+      - name: "eccentricity_severity"
+        mode: "fixed_bins"
         source: "feature"
-        column: "Ac (mm^2)"
-        bins: 4
-      - name: "slenderness"
+        column: "e/h"
+        edges: [0.0, 0.0, 0.1, 0.3, .inf]
+        labels: ["axial", "small_ecc", "moderate_ecc", "large_ecc"]
+      - name: "confinement_level"
+        mode: "fixed_bins"
         source: "feature"
-        column: "lambda"
+        column: "xi"
+        edges: [0.0, 0.5, 1.5, 3.0, .inf]
+        labels: ["low_conf", "mid_conf", "high_conf", "very_high_conf"]
         bins: 4
 
 paths:
-  output_dir: "output/raw_original_stratified_200"
+  output_dir: "output/psi_over_npl_log_original_200"
   model_dir: "models"
   model_output: "xgboost_model.pkl"
   preprocessor_output: "preprocessor.pkl"

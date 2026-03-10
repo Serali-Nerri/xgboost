@@ -21,7 +21,7 @@ from pathlib import Path
 import pandas as pd
 
 from src.utils.logger import setup_logger
-from src.utils.model_utils import load_model_from_directory
+from src.utils.model_utils import load_metadata, load_model_from_directory
 from src.predictor import Predictor, export_predictions
 
 logger = setup_logger(__name__)
@@ -58,6 +58,8 @@ def make_predictions(model_dir: str, input_data_path: str,
             raise FileNotFoundError(error_msg)
 
         model, preprocessor, feature_names = load_model_from_directory(model_dir)
+        metadata_path = Path(model_dir) / "training_metadata.json"
+        metadata = load_metadata(str(metadata_path)) if metadata_path.exists() else {}
         logger.info(f"Model loaded from {model_dir}")
         logger.info(f"Feature names loaded: {len(feature_names) if feature_names else 0} features")
 
@@ -74,19 +76,11 @@ def make_predictions(model_dir: str, input_data_path: str,
 
         # Step 3: Validate features
         logger.info("\nStep 3: Validating features...")
-
-        if feature_names:
-            missing_features = set(feature_names) - set(input_df.columns)
-            if missing_features:
-                error_msg = f"Missing required features: {missing_features}"
-                logger.error(error_msg)
-                raise ValueError(error_msg)
-
-            logger.debug(f"All {len(feature_names)} required features present")
+        logger.info("Deferring feature derivation/validation to Predictor")
 
         # Step 4: Initialize predictor
         logger.info("\nStep 4: Initializing predictor...")
-        predictor = Predictor(model, preprocessor, feature_names)
+        predictor = Predictor(model, preprocessor, feature_names, metadata=metadata)
         logger.info("Predictor initialized")
 
         # Step 5: Make predictions

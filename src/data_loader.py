@@ -9,6 +9,13 @@ import numpy as np
 from typing import Tuple, List, Optional
 from pathlib import Path
 
+from src.domain_features import (
+    apply_target_transform,
+    compute_training_target,
+    ensure_target_mode_columns,
+    get_training_target_name,
+    normalize_target_mode,
+)
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -32,12 +39,17 @@ class DataLoader:
         self.features_df: Optional[pd.DataFrame] = None
         self.target_series: Optional[pd.Series] = None
         self.target_raw: Optional[pd.Series] = None  # Original target before transform
+        self.training_target_raw: Optional[pd.Series] = None  # Raw modeled target before transform
         self.target_transform: Optional[str] = None  # Store transform type
+        self.target_mode: str = "raw"
+        self.training_target_name: str = ""
+        self.derived_columns: List[str] = []
         self.feature_names: List[str] = []
         self.target_name: str = ""
 
     def load_data(self, file_path: str, target_column: str,
-                  target_transform: Optional[str] = None) -> Tuple[pd.DataFrame, pd.Series]:
+                  target_transform: Optional[str] = None,
+                  target_mode: str = "raw") -> Tuple[pd.DataFrame, pd.Series]:
         """
         Load data from CSV file with optional target transformation.
 
@@ -45,6 +57,7 @@ class DataLoader:
             file_path: Path to CSV file
             target_column: Name of the target column
             target_transform: Transformation type ('log', 'sqrt', None)
+            target_mode: Modeled target definition ('raw', 'psi_over_npl')
 
         Returns:
             Tuple of (features_df, target_series_transformed)
@@ -70,6 +83,14 @@ class DataLoader:
             logger.error(error_msg)
             raise ValueError(error_msg)
 
+        self.target_mode = normalize_target_mode(target_mode)
+        df, derived_columns = ensure_target_mode_columns(
+            df,
+            report_target_column=target_column,
+            target_mode=self.target_mode,
+        )
+        self.derived_columns = derived_columns
+
         # Validate required columns
         if self.required_columns:
             missing_columns = set(self.required_columns) - set(df.columns)
@@ -87,29 +108,49 @@ class DataLoader:
         # Separate features and target
         self.target_name = target_column
         target_raw = df[target_column].copy()
-        self.features_df = df.drop(columns=[target_column]).copy()
+        self.training_target_name = get_training_target_name(target_column, self.target_mode)
+        training_target_raw = compute_training_target(
+            df,
+            report_target_column=target_column,
+            target_mode=self.target_mode,
+        )
+
+        columns_to_exclude = {target_column}
+        if self.training_target_name in df.columns and self.training_target_name != target_column:
+            columns_to_exclude.add(self.training_target_name)
+
+        self.features_df = df.drop(columns=sorted(columns_to_exclude)).copy()
         self.feature_names = self.features_df.columns.tolist()
 
         # Store original target values (for inverse transform and evaluation)
         self.target_raw = target_raw
+        self.training_target_raw = training_target_raw
 
         # Apply target transformation if specified
         self.target_transform = target_transform
-        if target_transform == 'log':
-            self.target_series = np.log(target_raw)
-            logger.info(f"Applied log transform to target: {target_column}")
-            logger.info(f"  Original range: [{target_raw.min():.2f}, {target_raw.max():.2f}]")
-            logger.info(f"  Transformed range: [{self.target_series.min():.4f}, {self.target_series.max():.4f}]")
-        elif target_transform == 'sqrt':
-            self.target_series = np.sqrt(target_raw)
-            logger.info(f"Applied sqrt transform to target: {target_column}")
-            logger.info(f"  Original range: [{target_raw.min():.2f}, {target_raw.max():.2f}]")
-            logger.info(f"  Transformed range: [{self.target_series.min():.4f}, {self.target_series.max():.4f}]")
-        else:
-            self.target_series = target_raw
+        self.target_series = apply_target_transform(training_target_raw, target_transform)
+        if target_transform:
+            logger.info(
+                "Applied %s transform to modeled target: %s",
+                target_transform,
+                self.training_target_name,
+            )
+            logger.info(
+                "  Raw modeled range: [%.6f, %.6f]",
+                float(training_target_raw.min()),
+                float(training_target_raw.max()),
+            )
+            logger.info(
+                "  Transformed range: [%.6f, %.6f]",
+                float(self.target_series.min()),
+                float(self.target_series.max()),
+            )
 
         logger.info(f"Data split into {len(self.feature_names)} features and 1 target")
-        logger.info(f"Target column: {self.target_name}")
+        logger.info(f"Report target column: {self.target_name}")
+        logger.info(f"Modeled target: {self.training_target_name} (mode={self.target_mode})")
+        if self.derived_columns:
+            logger.info(f"Derived columns added at load time: {self.derived_columns}")
         logger.info(f"Feature names: {self.feature_names[:10]}{'...' if len(self.feature_names) > 10 else ''}")
 
         return self.features_df, self.target_series

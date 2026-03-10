@@ -30,6 +30,7 @@ class Preprocessor:
         """
         self.columns_to_drop = columns_to_drop
         self.remaining_features: List[str] = []
+        self.auto_dropped_non_numeric: List[str] = []
         self.is_fitted = False
         logger.info(f"Preprocessor initialized with {len(columns_to_drop)} columns to drop: {columns_to_drop}")
 
@@ -57,11 +58,26 @@ class Preprocessor:
             logger.error(error_msg)
             raise ValueError(error_msg)
 
-        # Determine remaining features
-        self.remaining_features = [col for col in X.columns if col not in self.columns_to_drop]
+        candidate_features = [col for col in X.columns if col not in self.columns_to_drop]
+        self.auto_dropped_non_numeric = [
+            column
+            for column in candidate_features
+            if not pd.api.types.is_numeric_dtype(X[column])
+            and not pd.api.types.is_bool_dtype(X[column])
+        ]
+        self.remaining_features = [
+            column
+            for column in candidate_features
+            if column not in self.auto_dropped_non_numeric
+        ]
 
         logger.info(f"Original features: {len(X.columns)}")
         logger.info(f"Columns to drop: {len(self.columns_to_drop)}")
+        if self.auto_dropped_non_numeric:
+            logger.warning(
+                "Dropping non-numeric columns from model features: %s",
+                self.auto_dropped_non_numeric,
+            )
         logger.info(f"Remaining features: {len(self.remaining_features)}")
         logger.debug(f"Remaining feature names: {self.remaining_features}")
 
@@ -139,7 +155,7 @@ class Preprocessor:
         Returns:
             List of columns to drop
         """
-        return self.columns_to_drop.copy()
+        return self.columns_to_drop.copy() + self.auto_dropped_non_numeric.copy()
 
     def is_column_dropped(self, column: str) -> bool:
         """

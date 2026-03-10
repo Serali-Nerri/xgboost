@@ -33,6 +33,12 @@ OUTPUT_COLUMNS = [
     "e/h",
     "e1/e2",
     "e_bar",
+    "Npl (kN)",
+    "psi",
+    "b/h",
+    "L/h",
+    "axial_flag",
+    "section_family",
 ]
 
 INPUT_ALIASES = {
@@ -48,6 +54,7 @@ INPUT_ALIASES = {
     "e2 (mm)": ("e2 (mm)",),
     "Nexp (kN)": ("Nexp (kN)",),
 }
+OPTIONAL_INPUT_COLUMNS = {"Nexp (kN)"}
 
 STEEL_ELASTIC_MODULUS = 206000.0
 PLACEHOLDER_VALUES = {"", "-", "--", "—", "–", "NA", "N/A", "na", "nan", "NaN"}
@@ -88,6 +95,8 @@ def resolve_columns(fieldnames: list[str] | None) -> dict[str, str]:
                 mapping[output_name] = alias
                 break
         else:
+            if output_name in OPTIONAL_INPUT_COLUMNS:
+                continue
             aliases_text = ", ".join(aliases)
             raise ValueError(f"Required input column not found: {aliases_text}")
     return mapping
@@ -171,7 +180,19 @@ def safe_divide(numerator: float, denominator: float) -> float:
     return numerator / denominator
 
 
-def compute_feature_row(source: dict[str, float], row_number: int) -> list[float]:
+def infer_section_family(width: float, height: float, radius: float) -> str:
+    aspect_ratio = safe_divide(width, height)
+    radius_ratio = safe_divide(radius, height)
+    if abs(aspect_ratio - 1.0) <= 1e-6 and abs(radius_ratio - 0.5) <= 1e-3:
+        return "circular"
+    if abs(aspect_ratio - 1.0) <= 1e-6:
+        return "square"
+    if radius_ratio > 1e-3:
+        return "obround"
+    return "rectangular"
+
+
+def compute_feature_row(source: dict[str, float], row_number: int) -> list[object]:
     b = source["b (mm)"]
     h = source["h (mm)"]
     t = source["t (mm)"]
@@ -182,7 +203,7 @@ def compute_feature_row(source: dict[str, float], row_number: int) -> list[float
     length = source["L (mm)"]
     e1 = source["e1 (mm)"]
     e2 = source["e2 (mm)"]
-    nexp = source["Nexp (kN)"]
+    nexp = source.get("Nexp (kN)")
 
     if b <= 0 or h <= 0:
         raise ValueError(f"Row {row_number}: b and h must be positive.")
@@ -242,6 +263,10 @@ def compute_feature_row(source: dict[str, float], row_number: int) -> list[float
 
     section_modulus = total_inertia / (h / 2.0)
     e_bar = eccentricity * total_area / section_modulus
+    axial_flag = "axial" if abs(e_bar) <= 1e-12 else "eccentric"
+    section_family = infer_section_family(b, h, r0)
+    npl_kn = npl / 1000.0
+    psi = safe_divide(nexp, npl_kn) if nexp is not None else None
 
     return [
         b,
@@ -269,6 +294,12 @@ def compute_feature_row(source: dict[str, float], row_number: int) -> list[float
         eccentricity_ratio,
         eccentricity_ratio_12,
         e_bar,
+        npl_kn,
+        psi,
+        safe_divide(b, h),
+        safe_divide(length, h),
+        axial_flag,
+        section_family,
     ]
 
 

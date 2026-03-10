@@ -10,6 +10,14 @@ class StubModel:
         return X.sum(axis=1).to_numpy(dtype=float)
 
 
+class ConstantModel:
+    def __init__(self, value):
+        self.value = float(value)
+
+    def predict(self, X):
+        return np.full(len(X), self.value, dtype=float)
+
+
 class StubPreprocessor:
     def transform(self, X):
         transformed = X.copy()
@@ -54,3 +62,33 @@ def test_predict_batch_matches_direct_predict():
     batched = predictor.predict_batch(X, batch_size=2)
 
     assert np.allclose(direct, batched)
+
+
+def test_predict_restores_nexp_for_psi_target_without_requiring_nexp_input():
+    predictor = Predictor(
+        model=ConstantModel(np.log(0.8)),
+        feature_names=["As (mm^2)", "Ac (mm^2)", "fy (MPa)", "fc (MPa)", "Npl (kN)"],
+        metadata={
+            "target_mode": "psi_over_npl",
+            "report_target_column": "Nexp (kN)",
+            "target_transform": {
+                "enabled": True,
+                "type": "log",
+                "mode": "psi_over_npl",
+                "original_column": "Nexp (kN)",
+            },
+        },
+    )
+    X = pd.DataFrame(
+        {
+            "As (mm^2)": [1000.0, 1200.0],
+            "Ac (mm^2)": [2000.0, 1800.0],
+            "fy (MPa)": [300.0, 320.0],
+            "fc (MPa)": [40.0, 50.0],
+        }
+    )
+
+    predictions = predictor.predict(X)
+
+    expected_npl = np.array([(1000.0 * 300.0 + 2000.0 * 40.0) / 1000.0, (1200.0 * 320.0 + 1800.0 * 50.0) / 1000.0])
+    assert np.allclose(predictions, 0.8 * expected_npl)

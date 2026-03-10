@@ -9,13 +9,18 @@ import numpy as np
 import pandas as pd
 from typing import Dict, Tuple, Optional, List, Any, Protocol, Union, cast
 from sklearn.model_selection import KFold, train_test_split
-from sklearn.metrics import mean_squared_error
+from sklearn.metrics import mean_squared_error, r2_score
 from optuna.trial import Trial
 import time
 import json
 import os
 from pathlib import Path
 
+from src.domain_features import (
+    inverse_target_transform,
+    normalize_target_mode,
+    restore_report_target,
+)
 from src.utils.logger import get_logger
 from src.utils.model_utils import load_best_params, save_best_params
 from src.preprocessor import Preprocessor
@@ -36,6 +41,16 @@ TUNABLE_PARAM_KEYS = (
 
 OPTUNA_SEARCH_SPACE_VERSION = "centered_v4_stratified_consistent_cv"
 VALID_METRIC_SPACES = {"transformed", "original"}
+VALID_SELECTION_METRIC_SPACES = {"original_nexp", "report_target"}
+VALID_RMSE_NORMALIZERS = {"mean_actual"}
+DEFAULT_SELECTION_OBJECTIVE = {
+    "metric_space": "original_nexp",
+    "rmse_normalizer": "mean_actual",
+    "cov_threshold": 0.10,
+    "r2_threshold": 0.99,
+    "cov_weight": 2.0,
+    "r2_weight": 2.0,
+}
 
 
 def _normalize_metric_space(metric_space: Optional[str]) -> str:
@@ -47,18 +62,6 @@ def _normalize_metric_space(metric_space: Optional[str]) -> str:
             f"Expected one of {sorted(VALID_METRIC_SPACES)}."
         )
     return normalized
-
-
-def _inverse_transform_target(
-    values: Union[pd.Series, np.ndarray], target_transform_type: Optional[str]
-) -> np.ndarray:
-    """Convert transformed target values back into the original target space."""
-    array = np.asarray(values, dtype=float).reshape(-1)
-    if target_transform_type == "log":
-        return np.exp(array)
-    if target_transform_type == "sqrt":
-        return np.square(array)
-    return array
 
 
 def _negative_rmse_score(
@@ -73,10 +76,114 @@ def _negative_rmse_score(
     y_pred_array = np.asarray(y_pred, dtype=float).reshape(-1)
 
     if normalized_space == "original":
-        y_true_array = _inverse_transform_target(y_true_array, target_transform_type)
-        y_pred_array = _inverse_transform_target(y_pred_array, target_transform_type)
+        y_true_array = inverse_target_transform(y_true_array, target_transform_type)
+        y_pred_array = inverse_target_transform(y_pred_array, target_transform_type)
 
     return -float(np.sqrt(mean_squared_error(y_true_array, y_pred_array)))
+
+
+def _build_selection_objective_config(
+    raw_config: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    config = DEFAULT_SELECTION_OBJECTIVE.copy()
+    if raw_config:
+        config.update(raw_config)
+    metric_space = str(config.get("metric_space", "original_nexp")).strip().lower()
+    if metric_space not in VALID_SELECTION_METRIC_SPACES:
+        raise ValueError(
+            "selection_objective.metric_space must be one of "
+            f"{sorted(VALID_SELECTION_METRIC_SPACES)}"
+        )
+    rmse_normalizer = str(config.get("rmse_normalizer", "mean_actual")).strip().lower()
+    if rmse_normalizer not in VALID_RMSE_NORMALIZERS:
+        raise ValueError(
+            "selection_objective.rmse_normalizer must be one of "
+            f"{sorted(VALID_RMSE_NORMALIZERS)}"
+        )
+    config["metric_space"] = metric_space
+    config["rmse_normalizer"] = rmse_normalizer
+    return config
+
+
+def _calculate_cov_statistics(
+    y_true: Union[pd.Series, np.ndarray],
+    y_pred: Union[pd.Series, np.ndarray],
+) -> Dict[str, Optional[float]]:
+    y_true_array = np.asarray(y_true, dtype=float).reshape(-1)
+    y_pred_array = np.asarray(y_pred, dtype=float).reshape(-1)
+    ratios = y_pred_array / y_true_array
+    valid_mask = np.isfinite(ratios) & (y_true_array != 0)
+    valid_ratios = ratios[valid_mask]
+    if len(valid_ratios) == 0:
+        return {"cov": None, "mean_ratio": None, "std_ratio": None}
+
+    mean_ratio = float(np.mean(valid_ratios))
+    std_ratio = float(np.std(valid_ratios, ddof=1)) if len(valid_ratios) > 1 else 0.0
+    cov = std_ratio / mean_ratio if mean_ratio != 0 else None
+    return {
+        "cov": float(cov) if cov is not None else None,
+        "mean_ratio": mean_ratio,
+        "std_ratio": std_ratio,
+    }
+
+
+def _calculate_regression_metrics(
+    y_true: Union[pd.Series, np.ndarray],
+    y_pred: Union[pd.Series, np.ndarray],
+) -> Dict[str, Optional[float]]:
+    y_true_array = np.asarray(y_true, dtype=float).reshape(-1)
+    y_pred_array = np.asarray(y_pred, dtype=float).reshape(-1)
+
+    rmse = float(np.sqrt(mean_squared_error(y_true_array, y_pred_array)))
+    r2 = float(r2_score(y_true_array, y_pred_array))
+    mae = float(np.mean(np.abs(y_true_array - y_pred_array)))
+    mean_actual = float(np.mean(y_true_array))
+    cov_stats = _calculate_cov_statistics(y_true_array, y_pred_array)
+    return {
+        "rmse": rmse,
+        "r2": r2,
+        "mae": mae,
+        "mean_actual": mean_actual,
+        "cov": cov_stats["cov"],
+        "mean_ratio": cov_stats["mean_ratio"],
+        "std_ratio": cov_stats["std_ratio"],
+    }
+
+
+def _calculate_selection_objective(
+    metrics: Dict[str, Optional[float]],
+    selection_objective: Dict[str, Any],
+) -> float:
+    rmse = metrics.get("rmse")
+    r2 = metrics.get("r2")
+    cov = metrics.get("cov")
+    mean_actual = metrics.get("mean_actual")
+
+    if rmse is None or r2 is None or mean_actual is None or cov is None:
+        return 1e9
+
+    if selection_objective.get("metric_space") not in VALID_SELECTION_METRIC_SPACES:
+        raise ValueError(
+            "selection_objective.metric_space must be set to a supported reported-target space"
+        )
+
+    rmse_normalizer = str(selection_objective.get("rmse_normalizer", "mean_actual")).strip().lower()
+    if rmse_normalizer == "mean_actual":
+        scale = max(abs(float(mean_actual)), 1e-9)
+    else:
+        raise ValueError(
+            "selection_objective.rmse_normalizer must be set to a supported normalizer"
+        )
+
+    nrmse = float(rmse) / scale
+    cov_threshold = float(selection_objective["cov_threshold"])
+    r2_threshold = float(selection_objective["r2_threshold"])
+    cov_weight = float(selection_objective["cov_weight"])
+    r2_weight = float(selection_objective["r2_weight"])
+
+    cov_penalty = cov_weight * max(0.0, float(cov) - cov_threshold) / max(cov_threshold, 1e-9)
+    r2_penalty = r2_weight * max(0.0, r2_threshold - float(r2)) / max(1.0 - r2_threshold, 1e-9)
+    return float(nrmse + cov_penalty + r2_penalty)
 
 
 class CrossValidatorProtocol(Protocol):
@@ -112,10 +219,12 @@ class ModelTrainer:
         expected_context_hash: Optional[str] = None,
         optuna_metric_space: str = "transformed",
         target_transform_type: Optional[str] = None,
+        target_mode: str = "raw",
         columns_to_drop: Optional[List[str]] = None,
         validation_size: float = 0.0,
         early_stopping_rounds: Optional[int] = None,
         eval_metric: Optional[str] = None,
+        selection_objective: Optional[Dict[str, Any]] = None,
     ):
         """
         Initialize ModelTrainer.
@@ -129,10 +238,12 @@ class ModelTrainer:
             expected_context_hash: Expected training context hash for safe parameter reuse
             optuna_metric_space: RMSE scoring space for Optuna ('transformed' or 'original')
             target_transform_type: Target transform applied before model fitting
+            target_mode: Modeled target definition ('raw' or 'psi_over_npl')
             columns_to_drop: Columns removed by the preprocessor
             validation_size: Fold-internal validation share used for early stopping
             early_stopping_rounds: Early stopping rounds for fold/internal validation
             eval_metric: XGBoost eval metric used when validation is available
+            selection_objective: Composite CV/Optuna selection objective in report space
         """
         self.params = params or self._get_default_params()
         self.use_optuna = use_optuna
@@ -142,10 +253,12 @@ class ModelTrainer:
         self.expected_context_hash = expected_context_hash
         self.optuna_metric_space = _normalize_metric_space(optuna_metric_space)
         self.target_transform_type = target_transform_type
+        self.target_mode = normalize_target_mode(target_mode)
         self.columns_to_drop = list(columns_to_drop or [])
         self.validation_size = float(validation_size or 0.0)
         self.early_stopping_rounds = early_stopping_rounds
         self.eval_metric = eval_metric
+        self.selection_objective = _build_selection_objective_config(selection_objective)
         self.loaded_best_params = False
         self.model: Optional[xgb.XGBRegressor] = None
         self.training_history = []
@@ -166,9 +279,11 @@ class ModelTrainer:
             "ModelTrainer metric setup: "
             f"optuna_metric_space={self.optuna_metric_space}, "
             f"target_transform_type={self.target_transform_type or 'none'}, "
+            f"target_mode={self.target_mode}, "
             f"validation_size={self.validation_size}, "
             f"early_stopping_rounds={self.early_stopping_rounds}, "
-            f"eval_metric={self.eval_metric}"
+            f"eval_metric={self.eval_metric}, "
+            f"selection_objective={json.dumps(self.selection_objective, sort_keys=True)}"
         )
         logger.debug(f"Initial parameters: {json.dumps(self.params, indent=2)}")
 
@@ -392,6 +507,7 @@ class ModelTrainer:
         metric_space: Optional[str] = None,
         target_transform_type: Optional[str] = None,
         stratify_labels: Optional[pd.Series] = None,
+        y_report: Optional[pd.Series] = None,
     ) -> Dict[str, Any]:
         """
         Run fold-by-fold evaluation using the same fold-internal validation path as final training.
@@ -415,6 +531,9 @@ class ModelTrainer:
         cv_target = stratify_labels if stratify_labels is not None else y
 
         fold_scores: List[float] = []
+        fold_rmse: List[float] = []
+        fold_r2: List[float] = []
+        fold_cov: List[float] = []
         fold_details: List[Dict[str, Any]] = []
         start_time = time.time()
 
@@ -423,6 +542,11 @@ class ModelTrainer:
             X_test_fold_raw = X.iloc[test_idx].copy()
             y_train_fold = y.iloc[train_idx].copy()
             y_test_fold = y.iloc[test_idx].copy()
+            y_test_report = (
+                y_report.iloc[test_idx].copy()
+                if y_report is not None
+                else None
+            )
             fold_strata = (
                 stratify_labels.iloc[train_idx].copy()
                 if stratify_labels is not None
@@ -449,18 +573,46 @@ class ModelTrainer:
                 y_val=y_val,
             )
             y_pred = fold_model.predict(X_test)
-            fold_score = _negative_rmse_score(
-                y_true=y_test_fold,
-                y_pred=y_pred,
-                metric_space=scoring_space,
+            y_pred_report = restore_report_target(
+                y_pred,
+                target_mode=self.target_mode,
                 target_transform_type=active_target_transform,
+                reference_features=X_test_fold_raw,
             )
+            if y_test_report is None:
+                y_true_report = restore_report_target(
+                    y_test_fold,
+                    target_mode=self.target_mode,
+                    target_transform_type=active_target_transform,
+                    reference_features=X_test_fold_raw,
+                )
+            else:
+                y_true_report = y_test_report.to_numpy(dtype=float)
+
+            report_metrics = _calculate_regression_metrics(
+                y_true_report,
+                y_pred_report,
+            )
+            fold_score = _calculate_selection_objective(
+                report_metrics,
+                self.selection_objective,
+            )
+            transformed_rmse = float(np.sqrt(mean_squared_error(y_test_fold, y_pred)))
             fold_scores.append(float(fold_score))
+            rmse_value = report_metrics["rmse"]
+            r2_value = report_metrics["r2"]
+            fold_rmse.append(float(rmse_value) if rmse_value is not None else np.nan)
+            fold_r2.append(float(r2_value) if r2_value is not None else np.nan)
+            if report_metrics["cov"] is not None:
+                fold_cov.append(float(report_metrics["cov"]))
             fold_details.append(
                 {
                     "fold": fold_index + 1,
-                    "score": float(fold_score),
-                    "rmse": float(-fold_score),
+                    "selection_score": float(fold_score),
+                    "rmse_original_space": float(rmse_value) if rmse_value is not None else None,
+                    "r2_original_space": float(r2_value) if r2_value is not None else None,
+                    "cov_original_space": report_metrics["cov"],
+                    "rmse_training_space": transformed_rmse,
                     "n_train_outer": int(len(train_idx)),
                     "n_test_outer": int(len(test_idx)),
                     "n_train_inner": int(len(X_fit)),
@@ -477,10 +629,18 @@ class ModelTrainer:
             "std_cv_score": float(np.std(cv_scores)),
             "max_cv_score": float(np.max(cv_scores)),
             "min_cv_score": float(np.min(cv_scores)),
+            "mean_cv_rmse": float(np.mean(fold_rmse)) if fold_rmse else None,
+            "std_cv_rmse": float(np.std(fold_rmse)) if fold_rmse else None,
+            "mean_cv_r2": float(np.mean(fold_r2)) if fold_r2 else None,
+            "std_cv_r2": float(np.std(fold_r2)) if fold_r2 else None,
+            "mean_cv_cov": float(np.mean(fold_cov)) if fold_cov else None,
+            "std_cv_cov": float(np.std(fold_cov)) if fold_cov else None,
             "cv_time": cv_time,
             "n_folds": n_folds,
             "fold_details": fold_details,
             "metric_space": scoring_space,
+            "target_mode": self.target_mode,
+            "selection_objective": self.selection_objective,
             "validation_size": self.validation_size,
             "early_stopping_rounds": self.early_stopping_rounds,
             "eval_metric": self.eval_metric,
@@ -585,6 +745,7 @@ class ModelTrainer:
         self,
         X: pd.DataFrame,
         y: pd.Series,
+        y_report: Optional[pd.Series] = None,
         cv: CrossValidatorLike = 5,
         scoring: str = "neg_root_mean_squared_error",
         metric_space: Optional[str] = None,
@@ -597,6 +758,7 @@ class ModelTrainer:
         Args:
             X: Features DataFrame
             y: Target Series
+            y_report: Original reported target used for model selection and final metrics
             cv: Number of folds or cross-validator splitter
             scoring: Scoring metric (default: negative RMSE)
             metric_space: RMSE scoring space ('transformed' or 'original')
@@ -621,15 +783,27 @@ class ModelTrainer:
             metric_space=metric_space,
             target_transform_type=target_transform_type,
             stratify_labels=stratify_labels,
+            y_report=y_report,
         )
         scoring_space = results["metric_space"]
 
         logger.info(f"Cross-validation completed in {results['cv_time']:.2f} seconds")
         logger.info(f"CV scores: {results['cv_scores']}")
         logger.info(
-            f"Mean CV score ({scoring_space} space): "
+            f"Mean CV composite score ({scoring_space} space): "
             f"{results['mean_cv_score']:.4f} (+/- {results['std_cv_score']:.4f})"
         )
+        if results.get("mean_cv_rmse") is not None:
+            mean_cv_cov = results["mean_cv_cov"]
+            mean_cv_r2 = results["mean_cv_r2"]
+            cov_text = f"{mean_cv_cov:.4f}" if mean_cv_cov is not None else "N/A"
+            r2_text = f"{mean_cv_r2:.4f}" if mean_cv_r2 is not None else "N/A"
+            logger.info(
+                "Mean CV report-space metrics: "
+                f"RMSE={results['mean_cv_rmse']:.4f}, "
+                f"R²={r2_text}, "
+                f"COV={cov_text}"
+            )
 
         return results
 
@@ -637,6 +811,7 @@ class ModelTrainer:
         self,
         X: pd.DataFrame,
         y: pd.Series,
+        y_report: Optional[pd.Series] = None,
         cv: CrossValidatorLike = 5,
         n_trials: Optional[int] = None,
         study_name: str = "xgboost_optimization",
@@ -651,6 +826,7 @@ class ModelTrainer:
         Args:
             X: Features DataFrame
             y: Target Series
+            y_report: Original reported target used for model selection
             cv: Number of folds or cross-validator splitter
             n_trials: Number of optimization trials (uses instance default if None)
             study_name: Optuna study name
@@ -684,9 +860,8 @@ class ModelTrainer:
         logger.info(f"Optimization timeout: {self.optuna_timeout} seconds")
         logger.info(f"Optuna strategy version: {OPTUNA_SEARCH_SPACE_VERSION}")
         logger.info(
-            "Optuna RMSE scoring space: "
-            f"{self.optuna_metric_space} "
-            f"(target_transform={self.target_transform_type or 'none'})"
+            "Optuna selection metric: composite objective in reported target space "
+            f"(target_mode={self.target_mode}, target_transform={self.target_transform_type or 'none'})"
         )
 
         center_point = self.get_optuna_center_point()
@@ -736,9 +911,10 @@ class ModelTrainer:
                 metric_space=self.optuna_metric_space,
                 target_transform_type=self.target_transform_type,
                 stratify_labels=stratify_labels,
+                y_report=y_report,
             )
 
-            return float(-cv_results["mean_cv_score"])
+            return float(cv_results["mean_cv_score"])
 
         # Create Optuna study with persistent storage
         sampler = optuna.samplers.TPESampler(
@@ -770,7 +946,7 @@ class ModelTrainer:
         best_trial = study.best_trial
 
         logger.info(f"Optuna optimization completed in {opt_time:.2f} seconds")
-        logger.info(f"Best RMSE ({self.optuna_metric_space} space): {best_score:.4f}")
+        logger.info(f"Best composite objective: {best_score:.4f}")
         logger.info(f"Best parameters: {best_params}")
 
         # Save best parameters to file
@@ -784,6 +960,7 @@ class ModelTrainer:
             data_file=data_file,
             study_name=study_name,
             storage_url=storage_url,
+            score_label="best_composite_objective",
         )
 
         # Update model parameters with best found parameters
@@ -796,6 +973,8 @@ class ModelTrainer:
             "best_score": best_score,
             "metric_space": self.optuna_metric_space,
             "target_transform_type": self.target_transform_type,
+            "target_mode": self.target_mode,
+            "selection_objective": self.selection_objective,
             "n_trials_before": n_trials_before,
             "n_trials_after": n_trials_after,
             "n_trials": n_trials_after,

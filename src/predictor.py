@@ -10,6 +10,12 @@ import numpy as np
 from typing import Union, List, Any, Optional, Tuple, Dict
 from pathlib import Path
 
+from src.domain_features import (
+    REPORT_TARGET_COLUMN_DEFAULT,
+    ensure_prediction_feature_columns,
+    normalize_target_mode,
+    restore_report_target,
+)
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -24,7 +30,8 @@ class Predictor:
     """
 
     def __init__(self, model: Any, preprocessor: Optional[Any] = None,
-                 feature_names: Optional[List[str]] = None):
+                 feature_names: Optional[List[str]] = None,
+                 metadata: Optional[Dict[str, Any]] = None):
         """
         Initialize Predictor.
 
@@ -36,6 +43,7 @@ class Predictor:
         self.model = model
         self.preprocessor = preprocessor
         self.feature_names = feature_names or []
+        self.metadata = metadata or {}
         self._validate_model()
         logger.info("Predictor initialized")
         if self.feature_names:
@@ -100,11 +108,17 @@ class Predictor:
         logger.info(f"Making predictions on {len(X)} samples")
 
         try:
-            # Validate input
-            self._validate_input_data(X)
-
             # Make a copy to avoid modifying original data
-            X_processed = X.copy()
+            X_processed, derived_columns = ensure_prediction_feature_columns(
+                X.copy(),
+                target_mode=self._get_target_mode(),
+            )
+            if derived_columns:
+                logger.debug(f"Prediction-time derived columns added: {derived_columns}")
+            X_reference = X_processed.copy()
+
+            # Validate input
+            self._validate_input_data(X_processed)
 
             # Filter to expected features if specified
             if self.feature_names:
@@ -118,6 +132,12 @@ class Predictor:
 
             # Make predictions
             predictions = self.model.predict(X_processed)
+            predictions = restore_report_target(
+                predictions,
+                target_mode=self._get_target_mode(),
+                target_transform_type=self._get_target_transform_type(),
+                reference_features=X_reference,
+            )
 
             logger.info(f"Predictions completed: {len(predictions)} samples")
             logger.debug(f"Prediction range: [{predictions.min():.4f}, {predictions.max():.4f}]")
@@ -128,6 +148,24 @@ class Predictor:
             error_msg = f"Prediction failed: {str(e)}"
             logger.error(error_msg)
             raise Exception(error_msg)
+
+    def _get_target_mode(self) -> str:
+        target_transform = self.metadata.get("target_transform", {})
+        raw_mode = self.metadata.get("target_mode", target_transform.get("mode", "raw"))
+        return normalize_target_mode(raw_mode)
+
+    def _get_target_transform_type(self) -> Optional[str]:
+        target_transform = self.metadata.get("target_transform", {})
+        return target_transform.get("type") if target_transform.get("enabled") else None
+
+    def _get_report_target_column(self) -> str:
+        target_transform = self.metadata.get("target_transform", {})
+        return str(
+            self.metadata.get(
+                "report_target_column",
+                target_transform.get("original_column", REPORT_TARGET_COLUMN_DEFAULT),
+            )
+        )
 
     def predict_single(self, data: Union[pd.DataFrame, Dict[str, Any]]) -> float:
         """

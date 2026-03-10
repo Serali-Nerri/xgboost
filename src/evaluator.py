@@ -6,15 +6,60 @@ This module handles model evaluation and metrics calculation for regression task
 
 import numpy as np
 import pandas as pd
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from pathlib import Path
 import json
 
+from src.splitting import (
+    _resolve_regime_source_values,
+    apply_regime_schema,
+    fit_regime_schema,
+)
 from src.utils.logger import get_logger
-from src.splitting import build_regime_labels
 
 logger = get_logger(__name__)
+VALID_REGIME_SORT_METRICS = {
+    "rmse",
+    "mae",
+    "r2",
+    "cov",
+    "mean_ratio",
+    "std_ratio",
+    "n_samples",
+}
+
+
+def _normalize_regime_sort_metric(raw_metric: Optional[str]) -> str:
+    metric = str(raw_metric or "rmse").strip().lower()
+    if metric not in VALID_REGIME_SORT_METRICS:
+        raise ValueError(
+            "evaluation.regime_analysis.sort_metric must be one of "
+            f"{sorted(VALID_REGIME_SORT_METRICS)}"
+        )
+    return metric
+
+
+def _group_sort_value(group: Dict[str, Any], sort_metric: str) -> float:
+    if sort_metric == "n_samples":
+        return float(group.get("n_samples", 0))
+
+    metrics = group.get("metrics", {})
+    raw_value = metrics.get(sort_metric)
+    if raw_value is None:
+        return float("-inf")
+    if sort_metric == "mean_ratio":
+        return abs(float(raw_value) - 1.0)
+    return float(raw_value)
+
+
+def _sort_regime_groups(groups: List[Dict[str, Any]], sort_metric: str) -> List[Dict[str, Any]]:
+    reverse = sort_metric != "r2"
+    return sorted(
+        groups,
+        key=lambda group: _group_sort_value(group, sort_metric),
+        reverse=reverse,
+    )
 
 
 class Evaluator:
@@ -133,6 +178,8 @@ class Evaluator:
                 'mean_prediction': float(mean_pred),
                 'mean_actual': float(mean_true),
                 'cov': float(cov) if not np.isnan(cov) else None,
+                'mean_ratio': float(mean_ratio) if 'mean_ratio' in locals() and not np.isnan(mean_ratio) else None,
+                'std_ratio': float(std_ratio) if 'std_ratio' in locals() and not np.isnan(std_ratio) else None,
                 'n_samples': len(y_true_array)
             }
 
@@ -159,16 +206,17 @@ class Evaluator:
         y_true: pd.Series,
         y_pred: np.ndarray,
         features: Optional[pd.DataFrame],
-        regime_config: Optional[Dict[str, Any]],
+        regime_schema: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
         """
-        Calculate metrics for configured target/feature regimes.
+        Calculate metrics for previously fitted regime schemas.
         """
-        if not regime_config or not regime_config.get("enabled", False):
+        if not regime_schema or not regime_schema.get("enabled", False):
             return {}
 
-        regimes = regime_config.get("regimes", [])
-        if not isinstance(regimes, list):
+        fitted_regimes = regime_schema.get("regimes", [])
+        sort_metric = _normalize_regime_sort_metric(regime_schema.get("sort_metric", "rmse"))
+        if not isinstance(fitted_regimes, list):
             raise ValueError("evaluation.regime_analysis.regimes must be a list")
 
         y_true_series = pd.Series(np.asarray(y_true).reshape(-1), index=y_true.index)
@@ -177,42 +225,24 @@ class Evaluator:
             raise ValueError("y_true and y_pred must have the same length for regime metrics")
 
         results: Dict[str, Any] = {}
-        for regime_spec in regimes:
-            if not isinstance(regime_spec, dict):
-                raise ValueError("Each regime definition must be a mapping")
-            regime_name = str(regime_spec.get("name", "")).strip()
-            source = str(regime_spec.get("source", "target")).strip().lower()
-            bins = regime_spec.get("bins", 4)
-
+        for fitted in fitted_regimes:
+            if not isinstance(fitted, dict):
+                raise ValueError("Each fitted regime schema must be a mapping")
+            regime_name = str(fitted.get("name", "")).strip()
             if not regime_name:
-                raise ValueError("Each regime definition requires a non-empty name")
-            if isinstance(bins, bool) or not isinstance(bins, int) or bins < 2:
-                raise ValueError(f"Invalid bins for regime '{regime_name}': {bins}")
+                raise ValueError("Each fitted regime schema requires a non-empty name")
 
-            if source == "target":
-                regime_values = y_true_series
-            elif source == "feature":
-                column = regime_spec.get("column")
-                if features is None:
-                    logger.warning(
-                        "Skipping regime '%s' because feature data is not available",
-                        regime_name,
-                    )
-                    continue
-                if column not in features.columns:
-                    logger.warning(
-                        "Skipping regime '%s' because feature column '%s' is missing",
-                        regime_name,
-                        column,
-                    )
-                    continue
-                regime_values = features[column]
-            else:
-                raise ValueError(
-                    f"Unsupported regime source '{source}' for regime '{regime_name}'"
+            try:
+                regime_values = _resolve_regime_source_values(
+                    features=features,
+                    target=y_true_series,
+                    regime_spec=fitted,
                 )
+            except ValueError as exc:
+                logger.warning("Skipping regime '%s': %s", regime_name, exc)
+                continue
 
-            labels, ranges = build_regime_labels(regime_values, int(bins), regime_name)
+            labels = apply_regime_schema(regime_values, fitted)
             grouped_results = []
             for label in sorted(labels.dropna().unique()):
                 mask = labels == label
@@ -236,9 +266,22 @@ class Evaluator:
                 )
 
             if grouped_results:
+                grouped_results = _sort_regime_groups(grouped_results, sort_metric)
                 worst_bucket = max(
                     grouped_results,
                     key=lambda item: item["metrics"]["rmse"],
+                )
+                worst_cov_bucket = max(
+                    grouped_results,
+                    key=lambda item: (
+                        item["metrics"]["cov"]
+                        if item["metrics"].get("cov") is not None
+                        else float("-inf")
+                    ),
+                )
+                worst_r2_bucket = min(
+                    grouped_results,
+                    key=lambda item: item["metrics"]["r2"],
                 )
                 best_bucket = min(
                     grouped_results,
@@ -246,19 +289,61 @@ class Evaluator:
                 )
             else:
                 worst_bucket = None
+                worst_cov_bucket = None
+                worst_r2_bucket = None
                 best_bucket = None
 
             results[regime_name] = {
-                "source": source,
-                "column": regime_spec.get("column"),
-                "bins_requested": int(bins),
-                "ranges": ranges,
+                "mode": fitted.get("mode"),
+                "source": fitted.get("source"),
+                "column": fitted.get("column"),
+                "schema": fitted,
+                "ranges": fitted.get("ranges", []),
                 "groups": grouped_results,
                 "worst_rmse_group": worst_bucket,
+                "worst_cov_group": worst_cov_bucket,
+                "worst_r2_group": worst_r2_bucket,
                 "best_rmse_group": best_bucket,
             }
 
         return results
+
+    def fit_regime_schema(
+        self,
+        y_true: pd.Series,
+        features: Optional[pd.DataFrame],
+        regime_config: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Fit comparable regime schemas on the reference split."""
+        if not regime_config or not regime_config.get("enabled", False):
+            return {}
+
+        regimes = regime_config.get("regimes", [])
+        if not isinstance(regimes, list):
+            raise ValueError("evaluation.regime_analysis.regimes must be a list")
+        reference_split = str(regime_config.get("reference_split", "train")).strip().lower()
+        if reference_split != "train":
+            raise ValueError("evaluation.regime_analysis.reference_split currently only supports 'train'")
+        sort_metric = _normalize_regime_sort_metric(regime_config.get("sort_metric", "rmse"))
+
+        y_true_series = pd.Series(np.asarray(y_true).reshape(-1), index=y_true.index)
+        fitted_regimes = []
+        for regime_spec in regimes:
+            if not isinstance(regime_spec, dict):
+                raise ValueError("Each regime definition must be a mapping")
+            regime_values = _resolve_regime_source_values(
+                features=features,
+                target=y_true_series,
+                regime_spec=regime_spec,
+            )
+            fitted_regimes.append(fit_regime_schema(regime_values, regime_spec))
+
+        return {
+            "enabled": True,
+            "reference_split": reference_split,
+            "sort_metric": sort_metric,
+            "regimes": fitted_regimes,
+        }
 
     def evaluate_model(self, model: Any, X: pd.DataFrame, y: pd.Series,
                       model_name: str = "model") -> Dict[str, Any]:

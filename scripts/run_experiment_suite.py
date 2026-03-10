@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Run the three configured training experiments and summarize their outputs.
+Run the configured psi/Npl-mainline training experiments and summarize their outputs.
 """
 
 from __future__ import annotations
@@ -45,21 +45,28 @@ def summarize_report(report: Dict[str, Any]) -> Dict[str, Any]:
     test_metrics = report["test_metrics_original_space"]
     cv_results = report["cv_results"]
     optuna_info = report.get("optuna_run_info") or {}
+    selection_metrics = report.get("selection_metrics_cv") or {}
     return {
         "config_path": report["config_path"],
         "output_dir": report["output_dir"],
+        "target_mode": report.get("target_mode"),
+        "report_target_column": report.get("report_target_column"),
         "split_strategy_effective": report.get("split_strategy_effective"),
         "optuna_metric_space": report.get("optuna_metric_space"),
         "cv_metric_space": report.get("cv_metric_space"),
         "target_transform": report.get("target_transform", {}),
+        "selection_basis": "cv_composite_objective",
         "best_score": optuna_info.get("best_score"),
         "best_params": optuna_info.get("best_params"),
+        "cv_composite_score": selection_metrics.get("composite_objective", cv_results.get("mean_cv_score")),
+        "cv_rmse": selection_metrics.get("rmse", cv_results.get("mean_cv_rmse")),
+        "cv_rmse_std": cv_results.get("std_cv_rmse"),
+        "cv_r2": selection_metrics.get("r2", cv_results.get("mean_cv_r2")),
+        "cv_cov": selection_metrics.get("cov", cv_results.get("mean_cv_cov")),
         "test_rmse": test_metrics.get("rmse"),
         "test_mae": test_metrics.get("mae"),
         "test_r2": test_metrics.get("r2"),
         "test_cov": test_metrics.get("cov"),
-        "cv_rmse": -float(cv_results["mean_cv_score"]),
-        "cv_rmse_std": float(cv_results["std_cv_score"]),
     }
 
 
@@ -72,6 +79,11 @@ def main() -> int:
             check=True,
         )
         summaries.append(summarize_report(read_report(config_path)))
+    summaries.sort(
+        key=lambda item: (
+            float("inf") if item.get("cv_composite_score") is None else float(item["cv_composite_score"])
+        )
+    )
 
     logs_dir = REPO_ROOT / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
