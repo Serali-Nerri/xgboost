@@ -31,15 +31,15 @@ data:
 model:
   params:
     objective: "reg:squarederror"
-    max_depth: 6
-    learning_rate: 0.04411666122575092
-    n_estimators: 4066
-    subsample: 0.7038011848542036
-    colsample_bytree: 0.4714919226150699
-    min_child_weight: 6
-    reg_alpha: 0.033505711876129954
-    reg_lambda: 0.1408673338811182
-    gamma: 0.00020676219564729034
+    max_depth: 5
+    learning_rate: 0.0451669400461485
+    n_estimators: 3970
+    subsample: 0.7238136617365515
+    colsample_bytree: 0.4212006920305448
+    min_child_weight: 4
+    reg_alpha: 0.012529841627285286
+    reg_lambda: 0.44957639473634237
+    gamma: 0.00013613870646182803
     random_state: 42
     tree_method: "hist"
     device: "cpu"

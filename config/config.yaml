@@ -1,4 +1,4 @@
-# CFST XGBoost Pipeline Configuration
+# log(psi)-space training + original-Nexp selection metric
 
 data:
   file_path: "data/processed/2026.3.9-11864_feature_parameters_raw.csv"
@@ -15,7 +15,7 @@ data:
     - "r0 (mm)"
     - "t (mm)"
     - "L (mm)"
-    - "Npl (kN)"
+    - "lambda"
 
   test_size: 0.2
   random_state: 42
@@ -32,14 +32,14 @@ model:
   params:
     objective: "reg:squarederror"
     max_depth: 5
-    learning_rate: 0.04
-    n_estimators: 4200
-    subsample: 0.67
-    colsample_bytree: 0.52
-    min_child_weight: 6
-    reg_alpha: 0.03
-    reg_lambda: 0.08
-    gamma: 0.001
+    learning_rate: 0.0451669400461485
+    n_estimators: 3970
+    subsample: 0.7238136617365515
+    colsample_bytree: 0.4212006920305448
+    min_child_weight: 4
+    reg_alpha: 0.012529841627285286
+    reg_lambda: 0.44957639473634237
+    gamma: 0.00013613870646182803
     random_state: 42
     tree_method: "hist"
     device: "cpu"
