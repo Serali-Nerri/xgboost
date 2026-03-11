@@ -1,0 +1,339 @@
+[
+  {
+    "stage": "stage2",
+    "id": "R4_geometry_compact_v1",
+    "description": "Drop Re and te while keeping dimensionless geometry descriptors",
+    "n_features": 18,
+    "feature_names": [
+      "R (%)",
+      "fy (MPa)",
+      "fc (MPa)",
+      "e1 (mm)",
+      "e2 (mm)",
+      "r0/h",
+      "b/t",
+      "Ac (mm^2)",
+      "As (mm^2)",
+      "ke",
+      "xi",
+      "sigma_re (MPa)",
+      "lambda_bar",
+      "e/h",
+      "e1/e2",
+      "e_bar",
+      "b/h",
+      "L/h"
+    ],
+    "cv_composite_score": 1.5130098661645275,
+    "cv_rmse": 335.1363013418566,
+    "cv_r2": 0.983829019068047,
+    "cv_cov": 0.10305749477739343,
+    "test_rmse": 243.48366229275925,
+    "test_r2": 0.9891441141148442,
+    "test_cov": 0.09134576898325679,
+    "scale_npl_worst": {
+      "worst_cov_label": "scale_npl_q4",
+      "worst_cov": 0.10586683333742225,
+      "worst_rmse_label": "scale_npl_q5",
+      "worst_rmse": 467.9609131000911
+    },
+    "section_family_worst": {
+      "worst_cov_label": "square",
+      "worst_cov": 0.107758334270613,
+      "worst_rmse_label": "square",
+      "worst_rmse": 302.58892356213846
+    },
+    "slenderness_state_worst": {
+      "worst_cov_label": "slender",
+      "worst_cov": 0.13452425029525986,
+      "worst_rmse_label": "very_stocky",
+      "worst_rmse": 280.30279857381134
+    },
+    "eccentricity_severity_worst": {
+      "worst_cov_label": "large_ecc",
+      "worst_cov": 0.12253661311752935,
+      "worst_rmse_label": "moderate_ecc",
+      "worst_rmse": 275.93196902481424
+    }
+  },
+  {
+    "stage": "stage2",
+    "id": "R1_eccentricity_compact_v1",
+    "description": "Replace raw e1/e2 with axial_indicator while keeping normalized eccentricity descriptors",
+    "n_features": 19,
+    "feature_names": [
+      "R (%)",
+      "fy (MPa)",
+      "fc (MPa)",
+      "r0/h",
+      "b/t",
+      "Ac (mm^2)",
+      "As (mm^2)",
+      "Re (mm)",
+      "te (mm)",
+      "ke",
+      "xi",
+      "sigma_re (MPa)",
+      "lambda_bar",
+      "e/h",
+      "e1/e2",
+      "e_bar",
+      "b/h",
+      "L/h",
+      "axial_indicator"
+    ],
+    "cv_composite_score": 1.6621962788218148,
+    "cv_rmse": 340.77419803292315,
+    "cv_r2": 0.9831306083178856,
+    "cv_cov": 0.10340024246853348,
+    "test_rmse": 229.50165319618156,
+    "test_r2": 0.9903551105272698,
+    "test_cov": 0.09058637002939376,
+    "scale_npl_worst": {
+      "worst_cov_label": "scale_npl_q4",
+      "worst_cov": 0.10703056041656166,
+      "worst_rmse_label": "scale_npl_q5",
+      "worst_rmse": 436.79044041130385
+    },
+    "section_family_worst": {
+      "worst_cov_label": "rectangular",
+      "worst_cov": 0.10679560005823582,
+      "worst_rmse_label": "square",
+      "worst_rmse": 274.08923383081645
+    },
+    "slenderness_state_worst": {
+      "worst_cov_label": "slender",
+      "worst_cov": 0.1292083186056346,
+      "worst_rmse_label": "very_stocky",
+      "worst_rmse": 258.4873603842207
+    },
+    "eccentricity_severity_worst": {
+      "worst_cov_label": "large_ecc",
+      "worst_cov": 0.11880654716616504,
+      "worst_rmse_label": "moderate_ecc",
+      "worst_rmse": 245.70170349660845
+    }
+  },
+  {
+    "stage": "stage2",
+    "id": "R5_compact_reparam_v1",
+    "description": "Compact reparameterized 15-feature candidate",
+    "n_features": 15,
+    "feature_names": [
+      "R (%)",
+      "strength_ratio",
+      "steel_capacity_share",
+      "ke",
+      "xi",
+      "sigma_re (MPa)",
+      "lambda_bar",
+      "L/h",
+      "r0/h",
+      "b/h",
+      "b/t",
+      "Npl (kN)",
+      "e/h",
+      "e1/e2",
+      "axial_indicator"
+    ],
+    "cv_composite_score": 2.440841223653901,
+    "cv_rmse": 370.681425128974,
+    "cv_r2": 0.979848911644817,
+    "cv_cov": 0.11085554108689981,
+    "test_rmse": 289.12716052097966,
+    "test_r2": 0.984692530572428,
+    "test_cov": 0.09533871240943813,
+    "scale_npl_worst": {
+      "worst_cov_label": "scale_npl_q4",
+      "worst_cov": 0.11524677754408752,
+      "worst_rmse_label": "scale_npl_q5",
+      "worst_rmse": 582.7683915070032
+    },
+    "section_family_worst": {
+      "worst_cov_label": "obround",
+      "worst_cov": 0.12828813944657044,
+      "worst_rmse_label": "square",
+      "worst_rmse": 370.5701212608185
+    },
+    "slenderness_state_worst": {
+      "worst_cov_label": "slender",
+      "worst_cov": 0.12500197010972686,
+      "worst_rmse_label": "very_stocky",
+      "worst_rmse": 342.673311968365
+    },
+    "eccentricity_severity_worst": {
+      "worst_cov_label": "large_ecc",
+      "worst_cov": 0.115632479092367,
+      "worst_rmse_label": "axial",
+      "worst_rmse": 303.6159236336249
+    }
+  },
+  {
+    "stage": "stage2",
+    "id": "R2_material_ratios_v1",
+    "description": "Replace fy/fc/Ac/As with strength_ratio and steel_capacity_share",
+    "n_features": 18,
+    "feature_names": [
+      "R (%)",
+      "e1 (mm)",
+      "e2 (mm)",
+      "r0/h",
+      "b/t",
+      "Re (mm)",
+      "te (mm)",
+      "ke",
+      "xi",
+      "sigma_re (MPa)",
+      "lambda_bar",
+      "e/h",
+      "e1/e2",
+      "e_bar",
+      "b/h",
+      "L/h",
+      "strength_ratio",
+      "steel_capacity_share"
+    ],
+    "cv_composite_score": 2.617669436125734,
+    "cv_rmse": 377.50186309313057,
+    "cv_r2": 0.9787681401726698,
+    "cv_cov": 0.10819343705380144,
+    "test_rmse": 259.7556665251572,
+    "test_r2": 0.9876446321674763,
+    "test_cov": 0.09351885381921038,
+    "scale_npl_worst": {
+      "worst_cov_label": "scale_npl_q4",
+      "worst_cov": 0.10660709080824796,
+      "worst_rmse_label": "scale_npl_q5",
+      "worst_rmse": 512.0362061113932
+    },
+    "section_family_worst": {
+      "worst_cov_label": "obround",
+      "worst_cov": 0.11529879989852769,
+      "worst_rmse_label": "square",
+      "worst_rmse": 326.13737852523406
+    },
+    "slenderness_state_worst": {
+      "worst_cov_label": "slender",
+      "worst_cov": 0.13236090205815645,
+      "worst_rmse_label": "very_stocky",
+      "worst_rmse": 306.4610725419854
+    },
+    "eccentricity_severity_worst": {
+      "worst_cov_label": "large_ecc",
+      "worst_cov": 0.1251975857762815,
+      "worst_rmse_label": "moderate_ecc",
+      "worst_rmse": 287.8876722145701
+    }
+  },
+  {
+    "stage": "stage2",
+    "id": "R3_material_ratios_v2",
+    "description": "Replace fy/fc/Ac/As with ratio-style composition variables",
+    "n_features": 19,
+    "feature_names": [
+      "R (%)",
+      "e1 (mm)",
+      "e2 (mm)",
+      "r0/h",
+      "b/t",
+      "Re (mm)",
+      "te (mm)",
+      "ke",
+      "xi",
+      "sigma_re (MPa)",
+      "lambda_bar",
+      "e/h",
+      "e1/e2",
+      "e_bar",
+      "b/h",
+      "L/h",
+      "strength_ratio",
+      "steel_area_ratio",
+      "steel_capacity_share"
+    ],
+    "cv_composite_score": 2.627041091791823,
+    "cv_rmse": 379.9210948769371,
+    "cv_r2": 0.9786985374132312,
+    "cv_cov": 0.10775683985835047,
+    "test_rmse": 272.3496247716451,
+    "test_r2": 0.986417516657687,
+    "test_cov": 0.09351243622465255,
+    "scale_npl_worst": {
+      "worst_cov_label": "scale_npl_q4",
+      "worst_cov": 0.11054144638259987,
+      "worst_rmse_label": "scale_npl_q5",
+      "worst_rmse": 538.9313140296555
+    },
+    "section_family_worst": {
+      "worst_cov_label": "obround",
+      "worst_cov": 0.11905434021464392,
+      "worst_rmse_label": "square",
+      "worst_rmse": 356.8615542184567
+    },
+    "slenderness_state_worst": {
+      "worst_cov_label": "slender",
+      "worst_cov": 0.13679038236131433,
+      "worst_rmse_label": "very_stocky",
+      "worst_rmse": 321.34115179384213
+    },
+    "eccentricity_severity_worst": {
+      "worst_cov_label": "large_ecc",
+      "worst_cov": 0.12005287859586701,
+      "worst_rmse_label": "moderate_ecc",
+      "worst_rmse": 306.1273262752797
+    }
+  },
+  {
+    "stage": "stage2",
+    "id": "R6_compact_reparam_v1_no_npl",
+    "description": "Compact reparameterized 14-feature candidate without Npl",
+    "n_features": 14,
+    "feature_names": [
+      "R (%)",
+      "strength_ratio",
+      "steel_capacity_share",
+      "ke",
+      "xi",
+      "sigma_re (MPa)",
+      "lambda_bar",
+      "L/h",
+      "r0/h",
+      "b/h",
+      "b/t",
+      "e/h",
+      "e1/e2",
+      "axial_indicator"
+    ],
+    "cv_composite_score": 2.917205954993899,
+    "cv_rmse": 394.51508771999386,
+    "cv_r2": 0.9777032036415838,
+    "cv_cov": 0.11267378797866492,
+    "test_rmse": 303.4797071393843,
+    "test_r2": 0.9831350549246125,
+    "test_cov": 0.09868784157871993,
+    "scale_npl_worst": {
+      "worst_cov_label": "scale_npl_q4",
+      "worst_cov": 0.11717705095008221,
+      "worst_rmse_label": "scale_npl_q5",
+      "worst_rmse": 616.6450681979146
+    },
+    "section_family_worst": {
+      "worst_cov_label": "obround",
+      "worst_cov": 0.14587577753283976,
+      "worst_rmse_label": "square",
+      "worst_rmse": 389.7391119759915
+    },
+    "slenderness_state_worst": {
+      "worst_cov_label": "slender",
+      "worst_cov": 0.11930767787656373,
+      "worst_rmse_label": "very_stocky",
+      "worst_rmse": 363.887138215587
+    },
+    "eccentricity_severity_worst": {
+      "worst_cov_label": "large_ecc",
+      "worst_cov": 0.11543417265875855,
+      "worst_rmse_label": "axial",
+      "worst_rmse": 317.27818137174927
+    }
+  }
+]

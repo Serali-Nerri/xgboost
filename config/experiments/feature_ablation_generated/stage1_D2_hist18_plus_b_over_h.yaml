@@ -1,0 +1,162 @@
+data:
+  file_path: data/processed/2026.3.9-11864_feature_parameters_raw.csv
+  target_column: Nexp (kN)
+  target_mode: psi_over_npl
+  target_transform:
+    enabled: true
+    type: log
+  columns_to_drop:
+  - b (mm)
+  - h (mm)
+  - r0 (mm)
+  - t (mm)
+  - L (mm)
+  - lambda
+  test_size: 0.2
+  random_state: 42
+  split:
+    strategy: regression_stratified
+    target_bins: 10
+    auxiliary_features:
+    - column: lambda_bar
+      bins: 3
+    min_stratum_size: 12
+  feature_selection:
+    name: D2_hist18_plus_b_over_h
+    include_features:
+    - R (%)
+    - fy (MPa)
+    - fc (MPa)
+    - e1 (mm)
+    - e2 (mm)
+    - r0/h
+    - b/t
+    - Ac (mm^2)
+    - As (mm^2)
+    - Re (mm)
+    - te (mm)
+    - ke
+    - xi
+    - sigma_re (MPa)
+    - lambda_bar
+    - e/h
+    - e1/e2
+    - e_bar
+    - b/h
+model:
+  params:
+    objective: reg:squarederror
+    max_depth: 5
+    learning_rate: 0.0451669400461485
+    n_estimators: 3970
+    subsample: 0.7238136617365515
+    colsample_bytree: 0.4212006920305448
+    min_child_weight: 4
+    reg_alpha: 0.012529841627285286
+    reg_lambda: 0.44957639473634237
+    gamma: 0.00013613870646182803
+    random_state: 42
+    tree_method: hist
+    device: cpu
+    n_jobs: -1
+  use_optuna: false
+  optuna_metric_space: original
+  cv_metric_space: original
+  n_trials: 0
+  optuna_timeout: 14400
+  optuna_storage_url: sqlite:///logs/optuna_study.db
+  best_params_path: logs/feature_ablation/stage1/D2_hist18_plus_b_over_h_best_params.json
+  early_stopping_rounds: 100
+  eval_metric: rmse
+  validation_size: 0.15
+  selection_objective:
+    metric_space: original_nexp
+    rmse_normalizer: mean_actual
+    cov_threshold: 0.1
+    r2_threshold: 0.99
+    cov_weight: 2.0
+    r2_weight: 2.0
+cv:
+  n_splits: 5
+  random_state: 42
+  shuffle: true
+evaluation:
+  regime_analysis:
+    enabled: true
+    reference_split: train
+    sort_metric: cov
+    regimes:
+    - name: axiality
+      mode: categorical
+      source: feature
+      column: axial_flag
+    - name: section_family
+      mode: categorical
+      source: feature
+      column: section_family
+    - name: slenderness_state
+      mode: fixed_bins
+      source: feature
+      column: lambda_bar
+      edges:
+      - 0.0
+      - 0.25
+      - 0.5
+      - 1.0
+      - .inf
+      labels:
+      - very_stocky
+      - stocky
+      - intermediate
+      - slender
+    - name: scale_npl
+      mode: train_quantile
+      source: feature
+      column: Npl (kN)
+      bins: 5
+    - name: eccentricity_severity
+      mode: fixed_bins
+      source: feature
+      column: e/h
+      edges:
+      - 0.0
+      - 0.0
+      - 0.1
+      - 0.3
+      - .inf
+      labels:
+      - axial
+      - small_ecc
+      - moderate_ecc
+      - large_ecc
+    - name: confinement_level
+      mode: fixed_bins
+      source: feature
+      column: xi
+      edges:
+      - 0.0
+      - 0.5
+      - 1.5
+      - 3.0
+      - .inf
+      labels:
+      - low_conf
+      - mid_conf
+      - high_conf
+      - very_high_conf
+      bins: 4
+paths:
+  output_dir: output/feature_ablation/stage1/D2_hist18_plus_b_over_h
+  model_dir: models
+  model_output: xgboost_model.pkl
+  preprocessor_output: preprocessor.pkl
+  feature_names_output: feature_names.json
+  metadata_output: training_metadata.json
+  feature_importance_plot: feature_importance.png
+  predictions_plot: predictions_vs_actual.png
+  evaluation_report: evaluation_report.json
+  logs_dir: logs
+logging:
+  level: INFO
+  format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+  file_name: cfst_xgboost.log

@@ -1,0 +1,17 @@
+{
+  "source": "optuna_best_so_far_103_complete_trials",
+  "study_name": "xgboost_optimization__2026_3_9_11864_feature_parameters_raw__e58a5106033b__20ce66148d",
+  "best_value": 1.5092090331330852,
+  "completed_trials": 103,
+  "parameters": {
+    "max_depth": 6,
+    "learning_rate": 0.031955818004798305,
+    "n_estimators": 4452,
+    "subsample": 0.7866734105919365,
+    "colsample_bytree": 0.4591557378871465,
+    "min_child_weight": 4,
+    "reg_alpha": 0.0031543096015525514,
+    "reg_lambda": 0.05198884625845396,
+    "gamma": 0.00013407670223416032
+  }
+}

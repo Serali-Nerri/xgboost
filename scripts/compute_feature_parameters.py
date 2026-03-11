@@ -37,6 +37,15 @@ OUTPUT_COLUMNS = [
     "psi",
     "b/h",
     "L/h",
+    "axial_indicator",
+    "steel_area_ratio",
+    "strength_ratio",
+    "steel_capacity_share",
+    "e_min/h",
+    "end_asymmetry_ratio",
+    "single_curvature_e/h",
+    "double_curvature_e/h",
+    "reverse_curvature_flag",
     "axial_flag",
     "section_family",
 ]
@@ -258,14 +267,23 @@ def compute_feature_row(source: dict[str, float], row_number: int) -> list[objec
     lambda_bar = math.sqrt(npl / ncr)
 
     eccentricity = max(abs(e1), abs(e2))
+    eccentricity_min = min(abs(e1), abs(e2))
     eccentricity_ratio = eccentricity / h
     eccentricity_ratio_12 = safe_divide(e1, e2)
+    end_asymmetry_ratio = safe_divide(eccentricity_min, eccentricity)
+    single_curvature_component = safe_divide(abs(e1 + e2) / 2.0, h)
+    double_curvature_component = safe_divide(abs(e1 - e2) / 2.0, h)
+    reverse_curvature_flag = 1.0 if e1 * e2 < 0.0 else 0.0
 
     section_modulus = total_inertia / (h / 2.0)
     e_bar = eccentricity * total_area / section_modulus
     axial_flag = "axial" if abs(e_bar) <= 1e-12 else "eccentric"
+    axial_indicator = 1.0 if axial_flag == "axial" else 0.0
     section_family = infer_section_family(b, h, r0)
+    steel_area_ratio = safe_divide(area_steel, area_concrete)
+    strength_ratio = safe_divide(fy, fc)
     npl_kn = npl / 1000.0
+    steel_capacity_share = safe_divide(area_steel * fy, npl)
     psi = safe_divide(nexp, npl_kn) if nexp is not None else None
 
     return [
@@ -298,6 +316,15 @@ def compute_feature_row(source: dict[str, float], row_number: int) -> list[objec
         psi,
         safe_divide(b, h),
         safe_divide(length, h),
+        axial_indicator,
+        steel_area_ratio,
+        strength_ratio,
+        steel_capacity_share,
+        safe_divide(eccentricity_min, h),
+        end_asymmetry_ratio,
+        single_curvature_component,
+        double_curvature_component,
+        reverse_curvature_flag,
         axial_flag,
         section_family,
     ]

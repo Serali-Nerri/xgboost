@@ -20,7 +20,21 @@ PSI_COLUMN = "psi"
 B_OVER_H_COLUMN = "b/h"
 L_OVER_H_COLUMN = "L/h"
 AXIAL_FLAG_COLUMN = "axial_flag"
+AXIAL_INDICATOR_COLUMN = "axial_indicator"
 SECTION_FAMILY_COLUMN = "section_family"
+STEEL_AREA_RATIO_COLUMN = "steel_area_ratio"
+STRENGTH_RATIO_COLUMN = "strength_ratio"
+STEEL_CAPACITY_SHARE_COLUMN = "steel_capacity_share"
+E_MIN_OVER_H_COLUMN = "e_min/h"
+END_ASYMMETRY_RATIO_COLUMN = "end_asymmetry_ratio"
+SINGLE_CURVATURE_E_OVER_H_COLUMN = "single_curvature_e/h"
+DOUBLE_CURVATURE_E_OVER_H_COLUMN = "double_curvature_e/h"
+REVERSE_CURVATURE_FLAG_COLUMN = "reverse_curvature_flag"
+E_MIN_OVER_H_COLUMN = "e_min/h"
+END_ASYMMETRY_RATIO_COLUMN = "end_asymmetry_ratio"
+SINGLE_CURVATURE_E_OVER_H_COLUMN = "single_curvature_e/h"
+DOUBLE_CURVATURE_E_OVER_H_COLUMN = "double_curvature_e/h"
+REVERSE_CURVATURE_FLAG_COLUMN = "reverse_curvature_flag"
 
 _ATOL_ASPECT = 1e-6
 _ATOL_RADIUS = 1e-3
@@ -95,6 +109,45 @@ def _require_columns(df: pd.DataFrame, columns: Sequence[str], context: str) -> 
         raise ValueError(
             f"Missing required columns for {context}: {missing}"
         )
+
+
+def _infer_axial_mask(df: pd.DataFrame) -> Optional[np.ndarray]:
+    """Infer whether each sample is axial (True) or eccentric (False)."""
+    if "e_bar" in df.columns:
+        return np.isclose(
+            df["e_bar"].astype(float).to_numpy(dtype=float),
+            0.0,
+            atol=1e-12,
+        )
+
+    if {"e1 (mm)", "e2 (mm)"}.issubset(df.columns):
+        eccentricity = np.maximum(
+            np.abs(df["e1 (mm)"].astype(float).to_numpy(dtype=float)),
+            np.abs(df["e2 (mm)"].astype(float).to_numpy(dtype=float)),
+        )
+        return np.isclose(eccentricity, 0.0, atol=1e-12)
+
+    return None
+
+
+def _can_derive_eccentricity_shape(df: pd.DataFrame) -> bool:
+    return {"e1 (mm)", "e2 (mm)", "h (mm)"}.issubset(df.columns)
+
+
+def _get_eccentricity_components(
+    df: pd.DataFrame,
+) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """
+    Return signed end eccentricities and reference section depth when available.
+    """
+    required = {"e1 (mm)", "e2 (mm)", "h (mm)"}
+    if not required.issubset(df.columns):
+        return None
+
+    e1 = df["e1 (mm)"].astype(float).to_numpy(dtype=float)
+    e2 = df["e2 (mm)"].astype(float).to_numpy(dtype=float)
+    h = df["h (mm)"].astype(float).to_numpy(dtype=float)
+    return e1, e2, h
 
 
 def infer_section_family(df: pd.DataFrame) -> pd.Series:
@@ -181,26 +234,141 @@ def ensure_domain_feature_columns(
         )
         derived_columns.append(L_OVER_H_COLUMN)
 
-    if AXIAL_FLAG_COLUMN not in result.columns:
-        if "e_bar" in result.columns:
-            is_axial = np.isclose(
-                result["e_bar"].astype(float).to_numpy(dtype=float),
+    if _can_derive_eccentricity_shape(result):
+        e1_abs = np.abs(result["e1 (mm)"].astype(float).to_numpy(dtype=float))
+        e2_abs = np.abs(result["e2 (mm)"].astype(float).to_numpy(dtype=float))
+        e_abs_max = np.maximum(e1_abs, e2_abs)
+        e_abs_min = np.minimum(e1_abs, e2_abs)
+        h_values = result["h (mm)"]
+        signed_product = (
+            result["e1 (mm)"].astype(float).to_numpy(dtype=float)
+            * result["e2 (mm)"].astype(float).to_numpy(dtype=float)
+        )
+
+        if E_MIN_OVER_H_COLUMN not in result.columns:
+            result[E_MIN_OVER_H_COLUMN] = _safe_divide(
+                e_abs_min,
+                h_values,
+            )
+            derived_columns.append(E_MIN_OVER_H_COLUMN)
+
+        if END_ASYMMETRY_RATIO_COLUMN not in result.columns:
+            result[END_ASYMMETRY_RATIO_COLUMN] = _safe_divide(
+                e_abs_min,
+                e_abs_max,
+            )
+            derived_columns.append(END_ASYMMETRY_RATIO_COLUMN)
+
+        if SINGLE_CURVATURE_E_OVER_H_COLUMN not in result.columns:
+            result[SINGLE_CURVATURE_E_OVER_H_COLUMN] = _safe_divide(
+                0.5 * np.abs(
+                    result["e1 (mm)"].astype(float).to_numpy(dtype=float)
+                    + result["e2 (mm)"].astype(float).to_numpy(dtype=float)
+                ),
+                h_values,
+            )
+            derived_columns.append(SINGLE_CURVATURE_E_OVER_H_COLUMN)
+
+        if DOUBLE_CURVATURE_E_OVER_H_COLUMN not in result.columns:
+            result[DOUBLE_CURVATURE_E_OVER_H_COLUMN] = _safe_divide(
+                0.5 * np.abs(
+                    result["e1 (mm)"].astype(float).to_numpy(dtype=float)
+                    - result["e2 (mm)"].astype(float).to_numpy(dtype=float)
+                ),
+                h_values,
+            )
+            derived_columns.append(DOUBLE_CURVATURE_E_OVER_H_COLUMN)
+
+        if REVERSE_CURVATURE_FLAG_COLUMN not in result.columns:
+            result[REVERSE_CURVATURE_FLAG_COLUMN] = np.where(
+                signed_product < 0.0,
+                1.0,
                 0.0,
-                atol=1e-12,
             )
-            result[AXIAL_FLAG_COLUMN] = np.where(is_axial, "axial", "eccentric")
+            derived_columns.append(REVERSE_CURVATURE_FLAG_COLUMN)
+
+    if (
+        STEEL_AREA_RATIO_COLUMN not in result.columns
+        and {"As (mm^2)", "Ac (mm^2)"}.issubset(result.columns)
+    ):
+        result[STEEL_AREA_RATIO_COLUMN] = _safe_divide(
+            result["As (mm^2)"], result["Ac (mm^2)"]
+        )
+        derived_columns.append(STEEL_AREA_RATIO_COLUMN)
+
+    if (
+        STRENGTH_RATIO_COLUMN not in result.columns
+        and {"fy (MPa)", "fc (MPa)"}.issubset(result.columns)
+    ):
+        result[STRENGTH_RATIO_COLUMN] = _safe_divide(
+            result["fy (MPa)"], result["fc (MPa)"]
+        )
+        derived_columns.append(STRENGTH_RATIO_COLUMN)
+
+    if (
+        STEEL_CAPACITY_SHARE_COLUMN not in result.columns
+        and {"As (mm^2)", "Ac (mm^2)", "fy (MPa)", "fc (MPa)"}.issubset(result.columns)
+    ):
+        steel_capacity = (
+            result["As (mm^2)"].astype(float) * result["fy (MPa)"].astype(float)
+        )
+        total_capacity = steel_capacity + (
+            result["Ac (mm^2)"].astype(float) * result["fc (MPa)"].astype(float)
+        )
+        result[STEEL_CAPACITY_SHARE_COLUMN] = _safe_divide(
+            steel_capacity,
+            total_capacity,
+        )
+        derived_columns.append(STEEL_CAPACITY_SHARE_COLUMN)
+
+    eccentricity_components = _get_eccentricity_components(result)
+    if eccentricity_components is not None:
+        e1, e2, h = eccentricity_components
+        abs_e1 = np.abs(e1)
+        abs_e2 = np.abs(e2)
+        e_min = np.minimum(abs_e1, abs_e2)
+        e_max = np.maximum(abs_e1, abs_e2)
+
+        if E_MIN_OVER_H_COLUMN not in result.columns:
+            result[E_MIN_OVER_H_COLUMN] = _safe_divide(e_min, h)
+            derived_columns.append(E_MIN_OVER_H_COLUMN)
+
+        if END_ASYMMETRY_RATIO_COLUMN not in result.columns:
+            result[END_ASYMMETRY_RATIO_COLUMN] = _safe_divide(e_min, e_max)
+            derived_columns.append(END_ASYMMETRY_RATIO_COLUMN)
+
+        if SINGLE_CURVATURE_E_OVER_H_COLUMN not in result.columns:
+            result[SINGLE_CURVATURE_E_OVER_H_COLUMN] = _safe_divide(
+                np.abs(e1 + e2) / 2.0,
+                h,
+            )
+            derived_columns.append(SINGLE_CURVATURE_E_OVER_H_COLUMN)
+
+        if DOUBLE_CURVATURE_E_OVER_H_COLUMN not in result.columns:
+            result[DOUBLE_CURVATURE_E_OVER_H_COLUMN] = _safe_divide(
+                np.abs(e1 - e2) / 2.0,
+                h,
+            )
+            derived_columns.append(DOUBLE_CURVATURE_E_OVER_H_COLUMN)
+
+        if REVERSE_CURVATURE_FLAG_COLUMN not in result.columns:
+            result[REVERSE_CURVATURE_FLAG_COLUMN] = np.where(
+                e1 * e2 < 0.0,
+                1.0,
+                0.0,
+            )
+            derived_columns.append(REVERSE_CURVATURE_FLAG_COLUMN)
+
+    axial_mask = _infer_axial_mask(result)
+    if AXIAL_FLAG_COLUMN not in result.columns:
+        if axial_mask is not None:
+            result[AXIAL_FLAG_COLUMN] = np.where(axial_mask, "axial", "eccentric")
             derived_columns.append(AXIAL_FLAG_COLUMN)
-        elif {"e1 (mm)", "e2 (mm)"}.issubset(result.columns):
-            eccentricity = np.maximum(
-                np.abs(result["e1 (mm)"].astype(float).to_numpy(dtype=float)),
-                np.abs(result["e2 (mm)"].astype(float).to_numpy(dtype=float)),
-            )
-            result[AXIAL_FLAG_COLUMN] = np.where(
-                np.isclose(eccentricity, 0.0, atol=1e-12),
-                "axial",
-                "eccentric",
-            )
-            derived_columns.append(AXIAL_FLAG_COLUMN)
+
+    if AXIAL_INDICATOR_COLUMN not in result.columns:
+        if axial_mask is not None:
+            result[AXIAL_INDICATOR_COLUMN] = np.where(axial_mask, 1.0, 0.0)
+            derived_columns.append(AXIAL_INDICATOR_COLUMN)
 
     if SECTION_FAMILY_COLUMN not in result.columns:
         can_build_section_family = (

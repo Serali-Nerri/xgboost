@@ -33,6 +33,7 @@ from src.domain_features import (
     normalize_target_mode,
     restore_report_target,
 )
+from src.feature_sets import resolve_feature_selection
 from src.utils.logger import setup_logger
 from src.data_loader import DataLoader
 from src.preprocessor import Preprocessor
@@ -99,6 +100,7 @@ def build_training_context(
     target_mode: str,
     target_transform_type: Optional[str],
     columns_to_drop: List[str],
+    feature_selection: Dict[str, Any],
     optuna_metric_space: str,
     selection_objective: Dict[str, Any],
     split_strategy: str,
@@ -118,6 +120,7 @@ def build_training_context(
         "target_mode": target_mode,
         "target_transform_type": target_transform_type or "none",
         "columns_to_drop": sorted(columns_to_drop),
+        "feature_selection": feature_selection,
         "optuna_metric_space": optuna_metric_space,
         "selection_objective": selection_objective,
         "split_strategy": split_strategy,
@@ -146,6 +149,7 @@ def build_optuna_tuning_fingerprint(
     cv_config: Dict[str, Any],
     optuna_metric_space: str,
     target_mode: str,
+    feature_selection: Dict[str, Any],
     selection_objective: Dict[str, Any],
     split_strategy: str,
     split_config: Dict[str, Any],
@@ -158,6 +162,7 @@ def build_optuna_tuning_fingerprint(
         "search_space_version": OPTUNA_SEARCH_SPACE_VERSION,
         "optuna_metric_space": optuna_metric_space,
         "target_mode": target_mode,
+        "feature_selection": feature_selection,
         "selection_objective": selection_objective,
         "split_strategy": split_strategy,
         "split_config": split_config,
@@ -358,6 +363,10 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
         data_path = data_config.get("file_path")
         target_column = data_config.get("target_column", "K")
         columns_to_drop = data_config.get("columns_to_drop", [])
+        feature_selection_config = cast(
+            Dict[str, Any],
+            data_config.get("feature_selection", {}),
+        )
         split_config = cast(Dict[str, Any], data_config.get("split", {}))
         if not data_path:
             raise ValueError("config.data.file_path is required")
@@ -409,41 +418,6 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
         # Validate XGBoost params early so study naming matches the real tuning config.
         xgb_params = build_xgb_params(model_config)
 
-        training_context = build_training_context(
-            data_file_path=data_path,
-            target_column=target_column,
-            target_mode=target_mode,
-            target_transform_type=target_transform_type,
-            columns_to_drop=columns_to_drop,
-            optuna_metric_space=optuna_metric_space,
-            selection_objective=selection_objective_config,
-            split_strategy=split_strategy,
-            split_config=split_config,
-            validation_size=validation_size,
-            early_stopping_rounds=early_stopping_rounds,
-            eval_metric=eval_metric,
-        )
-        context_hash = training_context["context_hash"]
-        tuning_fingerprint = build_optuna_tuning_fingerprint(
-            xgb_params,
-            cv_config,
-            optuna_metric_space,
-            target_mode,
-            selection_objective_config,
-            split_strategy,
-            split_config,
-            validation_size,
-            early_stopping_rounds,
-            eval_metric,
-        )
-        study_name = build_versioned_study_name(
-            data_path, context_hash, tuning_fingerprint
-        )
-        logger.info(f"Training context hash: {context_hash}")
-        logger.info(f"Optuna strategy version: {OPTUNA_SEARCH_SPACE_VERSION}")
-        logger.info(f"Optuna tuning fingerprint: {tuning_fingerprint}")
-        logger.info(f"Optuna study name: {study_name}")
-
         # Step 2: Load data
         logger.info("\nStep 2: Loading data...")
         data_loader = DataLoader(required_columns=[target_column])
@@ -466,6 +440,58 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
         logger.info(
             f"Data loaded: {len(features)} samples, {len(features.columns)} features"
         )
+
+        feature_selection = resolve_feature_selection(
+            features.columns.tolist(),
+            columns_to_drop=columns_to_drop,
+            feature_selection_config=feature_selection_config,
+            feature_frame=features,
+        )
+        selected_features = cast(List[str], feature_selection["selected_features"])
+        logger.info(
+            "Feature selection resolved: source=%s, preset=%s, selected=%s",
+            feature_selection["selection_source"],
+            feature_selection.get("preset"),
+            feature_selection["selected_feature_count"],
+        )
+        logger.info("Selected feature list: %s", selected_features)
+
+        training_context = build_training_context(
+            data_file_path=data_path,
+            target_column=target_column,
+            target_mode=target_mode,
+            target_transform_type=target_transform_type,
+            columns_to_drop=columns_to_drop,
+            feature_selection=feature_selection,
+            optuna_metric_space=optuna_metric_space,
+            selection_objective=selection_objective_config,
+            split_strategy=split_strategy,
+            split_config=split_config,
+            validation_size=validation_size,
+            early_stopping_rounds=early_stopping_rounds,
+            eval_metric=eval_metric,
+        )
+        context_hash = training_context["context_hash"]
+        tuning_fingerprint = build_optuna_tuning_fingerprint(
+            xgb_params,
+            cv_config,
+            optuna_metric_space,
+            target_mode,
+            feature_selection,
+            selection_objective_config,
+            split_strategy,
+            split_config,
+            validation_size,
+            early_stopping_rounds,
+            eval_metric,
+        )
+        study_name = build_versioned_study_name(
+            data_path, context_hash, tuning_fingerprint
+        )
+        logger.info(f"Training context hash: {context_hash}")
+        logger.info(f"Optuna strategy version: {OPTUNA_SEARCH_SPACE_VERSION}")
+        logger.info(f"Optuna tuning fingerprint: {tuning_fingerprint}")
+        logger.info(f"Optuna study name: {study_name}")
 
         # Step 2.5: Split data into train/test sets (FIXES DATA LEAKAGE)
         logger.info("\nStep 2.5: Splitting data into train/test sets...")
@@ -611,6 +637,7 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
             target_transform_type=target_transform_type,
             target_mode=target_mode,
             columns_to_drop=columns_to_drop,
+            include_features=selected_features,
             validation_size=validation_size,
             early_stopping_rounds=early_stopping_rounds,
             eval_metric=eval_metric,
@@ -682,7 +709,10 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
         )
 
         logger.info("\nStep 5: Fitting final model on full training split...")
-        preprocessor = Preprocessor(columns_to_drop=columns_to_drop)
+        preprocessor = Preprocessor(
+            columns_to_drop=columns_to_drop,
+            include_features=selected_features,
+        )
         X_train_processed = preprocessor.fit_transform(X_train_full)
         X_test_processed = preprocessor.transform(X_test)
         logger.info(
@@ -892,6 +922,7 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
                 "r2": cv_results.get("mean_cv_r2"),
                 "cov": cv_results.get("mean_cv_cov"),
             },
+            "feature_selection": feature_selection,
             "train_metrics_original_space": train_metrics,  # LEGACY
             "train_full_apparent_metrics_original_space": train_metrics,  # PRIMARY
             "test_metrics_original_space": test_metrics,  # PRIMARY
@@ -966,6 +997,7 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
                     "r2": cv_results.get("mean_cv_r2"),
                     "cov": cv_results.get("mean_cv_cov"),
                 },
+                "feature_selection": feature_selection,
                 "train_metrics_original_space": train_metrics,  # LEGACY
                 "train_full_apparent_metrics_original_space": train_metrics,  # PRIMARY
                 "test_metrics_original_space": test_metrics,  # PRIMARY
@@ -975,6 +1007,8 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
                 "train_regime_metrics_original_space": train_regime_metrics,
                 "test_regime_metrics_original_space": test_regime_metrics,
                 "cv_results": serializable_cv_results,
+                "feature_names": feature_names,
+                "n_features": len(feature_names),
                 "data_split": {
                     "n_train": len(X_train_full),
                     "n_test": len(X_test),

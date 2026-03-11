@@ -221,6 +221,7 @@ class ModelTrainer:
         target_transform_type: Optional[str] = None,
         target_mode: str = "raw",
         columns_to_drop: Optional[List[str]] = None,
+        include_features: Optional[List[str]] = None,
         validation_size: float = 0.0,
         early_stopping_rounds: Optional[int] = None,
         eval_metric: Optional[str] = None,
@@ -240,6 +241,7 @@ class ModelTrainer:
             target_transform_type: Target transform applied before model fitting
             target_mode: Modeled target definition ('raw' or 'psi_over_npl')
             columns_to_drop: Columns removed by the preprocessor
+            include_features: Explicit ordered feature list kept by the preprocessor
             validation_size: Fold-internal validation share used for early stopping
             early_stopping_rounds: Early stopping rounds for fold/internal validation
             eval_metric: XGBoost eval metric used when validation is available
@@ -255,6 +257,7 @@ class ModelTrainer:
         self.target_transform_type = target_transform_type
         self.target_mode = normalize_target_mode(target_mode)
         self.columns_to_drop = list(columns_to_drop or [])
+        self.include_features = list(include_features) if include_features is not None else None
         self.validation_size = float(validation_size or 0.0)
         self.early_stopping_rounds = early_stopping_rounds
         self.eval_metric = eval_metric
@@ -278,12 +281,13 @@ class ModelTrainer:
         logger.info(
             "ModelTrainer metric setup: "
             f"optuna_metric_space={self.optuna_metric_space}, "
-            f"target_transform_type={self.target_transform_type or 'none'}, "
-            f"target_mode={self.target_mode}, "
-            f"validation_size={self.validation_size}, "
-            f"early_stopping_rounds={self.early_stopping_rounds}, "
-            f"eval_metric={self.eval_metric}, "
-            f"selection_objective={json.dumps(self.selection_objective, sort_keys=True)}"
+                f"target_transform_type={self.target_transform_type or 'none'}, "
+                f"target_mode={self.target_mode}, "
+                f"include_features={len(self.include_features) if self.include_features is not None else 'auto'}, "
+                f"validation_size={self.validation_size}, "
+                f"early_stopping_rounds={self.early_stopping_rounds}, "
+                f"eval_metric={self.eval_metric}, "
+                f"selection_objective={json.dumps(self.selection_objective, sort_keys=True)}"
         )
         logger.debug(f"Initial parameters: {json.dumps(self.params, indent=2)}")
 
@@ -560,7 +564,10 @@ class ModelTrainer:
                 stratify_labels=fold_strata,
             )
 
-            preprocessor = Preprocessor(columns_to_drop=self.columns_to_drop)
+            preprocessor = Preprocessor(
+                columns_to_drop=self.columns_to_drop,
+                include_features=self.include_features,
+            )
             X_fit = preprocessor.fit_transform(X_fit_raw)
             X_test = preprocessor.transform(X_test_fold_raw)
             X_val = preprocessor.transform(X_val_raw) if X_val_raw is not None else None

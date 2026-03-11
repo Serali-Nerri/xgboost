@@ -5,7 +5,7 @@ This module handles data preprocessing including column dropping and data cleani
 """
 
 import pandas as pd
-from typing import List
+from typing import List, Optional
 import numpy as np
 
 from src.utils.logger import get_logger
@@ -21,18 +21,29 @@ class Preprocessor:
     Modeled after scikit-learn's Transformer interface for consistency.
     """
 
-    def __init__(self, columns_to_drop: List[str]):
+    def __init__(
+        self,
+        columns_to_drop: List[str],
+        include_features: Optional[List[str]] = None,
+    ):
         """
         Initialize Preprocessor.
 
         Args:
             columns_to_drop: List of column names to drop from the data
+            include_features: Explicit ordered feature list to keep after dropping
         """
         self.columns_to_drop = columns_to_drop
+        self.include_features = list(include_features) if include_features is not None else None
         self.remaining_features: List[str] = []
         self.auto_dropped_non_numeric: List[str] = []
+        self.excluded_by_feature_selection: List[str] = []
         self.is_fitted = False
-        logger.info(f"Preprocessor initialized with {len(columns_to_drop)} columns to drop: {columns_to_drop}")
+        logger.info(
+            "Preprocessor initialized with %s columns to drop and include_features=%s",
+            len(columns_to_drop),
+            len(self.include_features) if self.include_features is not None else "auto",
+        )
 
     def fit(self, X: pd.DataFrame) -> "Preprocessor":
         """
@@ -59,17 +70,54 @@ class Preprocessor:
             raise ValueError(error_msg)
 
         candidate_features = [col for col in X.columns if col not in self.columns_to_drop]
-        self.auto_dropped_non_numeric = [
-            column
-            for column in candidate_features
-            if not pd.api.types.is_numeric_dtype(X[column])
-            and not pd.api.types.is_bool_dtype(X[column])
-        ]
-        self.remaining_features = [
-            column
-            for column in candidate_features
-            if column not in self.auto_dropped_non_numeric
-        ]
+        if self.include_features is not None:
+            missing_selected = sorted(set(self.include_features) - set(candidate_features))
+            if missing_selected:
+                error_msg = (
+                    "Configured include_features are not available after dropping columns: "
+                    f"{missing_selected}"
+                )
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+
+            non_numeric_selected = [
+                column
+                for column in self.include_features
+                if not pd.api.types.is_numeric_dtype(X[column])
+                and not pd.api.types.is_bool_dtype(X[column])
+            ]
+            if non_numeric_selected:
+                error_msg = (
+                    "Configured include_features must be numeric or boolean columns: "
+                    f"{non_numeric_selected}"
+                )
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+
+            self.remaining_features = list(self.include_features)
+            self.auto_dropped_non_numeric = [
+                column
+                for column in candidate_features
+                if column not in self.include_features
+                and not pd.api.types.is_numeric_dtype(X[column])
+                and not pd.api.types.is_bool_dtype(X[column])
+            ]
+            self.excluded_by_feature_selection = [
+                column for column in candidate_features if column not in self.include_features
+            ]
+        else:
+            self.auto_dropped_non_numeric = [
+                column
+                for column in candidate_features
+                if not pd.api.types.is_numeric_dtype(X[column])
+                and not pd.api.types.is_bool_dtype(X[column])
+            ]
+            self.remaining_features = [
+                column
+                for column in candidate_features
+                if column not in self.auto_dropped_non_numeric
+            ]
+            self.excluded_by_feature_selection = []
 
         logger.info(f"Original features: {len(X.columns)}")
         logger.info(f"Columns to drop: {len(self.columns_to_drop)}")
@@ -77,6 +125,11 @@ class Preprocessor:
             logger.warning(
                 "Dropping non-numeric columns from model features: %s",
                 self.auto_dropped_non_numeric,
+            )
+        if self.excluded_by_feature_selection:
+            logger.info(
+                "Excluding %s columns via explicit feature selection",
+                len(self.excluded_by_feature_selection),
             )
         logger.info(f"Remaining features: {len(self.remaining_features)}")
         logger.debug(f"Remaining feature names: {self.remaining_features}")
@@ -155,7 +208,11 @@ class Preprocessor:
         Returns:
             List of columns to drop
         """
-        return self.columns_to_drop.copy() + self.auto_dropped_non_numeric.copy()
+        return (
+            self.columns_to_drop.copy()
+            + self.auto_dropped_non_numeric.copy()
+            + self.excluded_by_feature_selection.copy()
+        )
 
     def is_column_dropped(self, column: str) -> bool:
         """
@@ -167,7 +224,11 @@ class Preprocessor:
         Returns:
             True if column will be dropped, False otherwise
         """
-        return column in self.columns_to_drop
+        return (
+            column in self.columns_to_drop
+            or column in self.auto_dropped_non_numeric
+            or column in self.excluded_by_feature_selection
+        )
 
     def check_missing_values(self, X: pd.DataFrame) -> dict:
         """

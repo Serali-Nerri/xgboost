@@ -1,0 +1,470 @@
+[
+  {
+    "stage": "stage1",
+    "id": "D6_hist18_plus_b_over_h_l_over_h",
+    "description": "Historical 18 plus b/h and L/h",
+    "n_features": 20,
+    "feature_names": [
+      "R (%)",
+      "fy (MPa)",
+      "fc (MPa)",
+      "e1 (mm)",
+      "e2 (mm)",
+      "r0/h",
+      "b/t",
+      "Ac (mm^2)",
+      "As (mm^2)",
+      "Re (mm)",
+      "te (mm)",
+      "ke",
+      "xi",
+      "sigma_re (MPa)",
+      "lambda_bar",
+      "e/h",
+      "e1/e2",
+      "e_bar",
+      "b/h",
+      "L/h"
+    ],
+    "cv_composite_score": 1.4845810968533415,
+    "cv_rmse": 332.0376071459148,
+    "cv_r2": 0.9839200792791974,
+    "cv_cov": 0.10199128048383696,
+    "test_rmse": 239.6147344406239,
+    "test_r2": 0.9894863707259437,
+    "test_cov": 0.08992488111985618,
+    "scale_npl_worst": {
+      "worst_cov_label": "scale_npl_q4",
+      "worst_cov": 0.10627791049072409,
+      "worst_rmse_label": "scale_npl_q5",
+      "worst_rmse": 463.7307087513912
+    },
+    "section_family_worst": {
+      "worst_cov_label": "square",
+      "worst_cov": 0.10431225044764003,
+      "worst_rmse_label": "obround",
+      "worst_rmse": 275.62876757002914
+    },
+    "slenderness_state_worst": {
+      "worst_cov_label": "slender",
+      "worst_cov": 0.12455639390632627,
+      "worst_rmse_label": "very_stocky",
+      "worst_rmse": 278.2993524552895
+    },
+    "eccentricity_severity_worst": {
+      "worst_cov_label": "large_ecc",
+      "worst_cov": 0.11859925847369994,
+      "worst_rmse_label": "moderate_ecc",
+      "worst_rmse": 323.30808844981937
+    }
+  },
+  {
+    "stage": "stage1",
+    "id": "D7_current21",
+    "description": "Current 21-feature log(psi) mainline",
+    "n_features": 21,
+    "feature_names": [
+      "R (%)",
+      "fy (MPa)",
+      "fc (MPa)",
+      "e1 (mm)",
+      "e2 (mm)",
+      "r0/h",
+      "b/t",
+      "Ac (mm^2)",
+      "As (mm^2)",
+      "Re (mm)",
+      "te (mm)",
+      "ke",
+      "xi",
+      "sigma_re (MPa)",
+      "lambda_bar",
+      "e/h",
+      "e1/e2",
+      "e_bar",
+      "Npl (kN)",
+      "b/h",
+      "L/h"
+    ],
+    "cv_composite_score": 1.5050941911757632,
+    "cv_rmse": 333.37280948611794,
+    "cv_r2": 0.9838674526222159,
+    "cv_cov": 0.10220711378743227,
+    "test_rmse": 229.11090391922517,
+    "test_r2": 0.9903879253258945,
+    "test_cov": 0.09048842824317874,
+    "scale_npl_worst": {
+      "worst_cov_label": "scale_npl_q4",
+      "worst_cov": 0.10831499676187298,
+      "worst_rmse_label": "scale_npl_q5",
+      "worst_rmse": 431.4326950156482
+    },
+    "section_family_worst": {
+      "worst_cov_label": "obround",
+      "worst_cov": 0.10753367379273039,
+      "worst_rmse_label": "obround",
+      "worst_rmse": 275.6185864372998
+    },
+    "slenderness_state_worst": {
+      "worst_cov_label": "slender",
+      "worst_cov": 0.13187789784254472,
+      "worst_rmse_label": "slender",
+      "worst_rmse": 264.8668630293487
+    },
+    "eccentricity_severity_worst": {
+      "worst_cov_label": "large_ecc",
+      "worst_cov": 0.12614584650984903,
+      "worst_rmse_label": "moderate_ecc",
+      "worst_rmse": 246.30847095318538
+    }
+  },
+  {
+    "stage": "stage1",
+    "id": "D5_hist18_plus_npl_l_over_h",
+    "description": "Historical 18 plus Npl and L/h",
+    "n_features": 20,
+    "feature_names": [
+      "R (%)",
+      "fy (MPa)",
+      "fc (MPa)",
+      "e1 (mm)",
+      "e2 (mm)",
+      "r0/h",
+      "b/t",
+      "Ac (mm^2)",
+      "As (mm^2)",
+      "Re (mm)",
+      "te (mm)",
+      "ke",
+      "xi",
+      "sigma_re (MPa)",
+      "lambda_bar",
+      "e/h",
+      "e1/e2",
+      "e_bar",
+      "Npl (kN)",
+      "L/h"
+    ],
+    "cv_composite_score": 1.6075480490313232,
+    "cv_rmse": 338.5042013761512,
+    "cv_r2": 0.9833436746251858,
+    "cv_cov": 0.10284364871880547,
+    "test_rmse": 241.0981714876133,
+    "test_r2": 0.9893557895662304,
+    "test_cov": 0.08920473614157937,
+    "scale_npl_worst": {
+      "worst_cov_label": "scale_npl_q4",
+      "worst_cov": 0.1069267846384689,
+      "worst_rmse_label": "scale_npl_q5",
+      "worst_rmse": 469.50928739066103
+    },
+    "section_family_worst": {
+      "worst_cov_label": "obround",
+      "worst_cov": 0.1180932732660019,
+      "worst_rmse_label": "obround",
+      "worst_rmse": 281.2079411434067
+    },
+    "slenderness_state_worst": {
+      "worst_cov_label": "slender",
+      "worst_cov": 0.13039780599494435,
+      "worst_rmse_label": "very_stocky",
+      "worst_rmse": 280.3332252819498
+    },
+    "eccentricity_severity_worst": {
+      "worst_cov_label": "large_ecc",
+      "worst_cov": 0.11587287317487156,
+      "worst_rmse_label": "moderate_ecc",
+      "worst_rmse": 349.1455739730379
+    }
+  },
+  {
+    "stage": "stage1",
+    "id": "D3_hist18_plus_l_over_h",
+    "description": "Historical 18 plus L/h",
+    "n_features": 19,
+    "feature_names": [
+      "R (%)",
+      "fy (MPa)",
+      "fc (MPa)",
+      "e1 (mm)",
+      "e2 (mm)",
+      "r0/h",
+      "b/t",
+      "Ac (mm^2)",
+      "As (mm^2)",
+      "Re (mm)",
+      "te (mm)",
+      "ke",
+      "xi",
+      "sigma_re (MPa)",
+      "lambda_bar",
+      "e/h",
+      "e1/e2",
+      "e_bar",
+      "L/h"
+    ],
+    "cv_composite_score": 1.6648269344476319,
+    "cv_rmse": 340.7401661699986,
+    "cv_r2": 0.9831309167308648,
+    "cv_cov": 0.10345888408456508,
+    "test_rmse": 220.18582092348709,
+    "test_r2": 0.991122221279058,
+    "test_cov": 0.0914264733555144,
+    "scale_npl_worst": {
+      "worst_cov_label": "scale_npl_q4",
+      "worst_cov": 0.10704570408519942,
+      "worst_rmse_label": "scale_npl_q5",
+      "worst_rmse": 411.8916557384155
+    },
+    "section_family_worst": {
+      "worst_cov_label": "obround",
+      "worst_cov": 0.14128182566073053,
+      "worst_rmse_label": "obround",
+      "worst_rmse": 276.0415602668211
+    },
+    "slenderness_state_worst": {
+      "worst_cov_label": "slender",
+      "worst_cov": 0.13208389653566036,
+      "worst_rmse_label": "slender",
+      "worst_rmse": 252.28492569885935
+    },
+    "eccentricity_severity_worst": {
+      "worst_cov_label": "large_ecc",
+      "worst_cov": 0.12982103275869847,
+      "worst_rmse_label": "axial",
+      "worst_rmse": 229.21436690235896
+    }
+  },
+  {
+    "stage": "stage1",
+    "id": "D4_hist18_plus_npl_b_over_h",
+    "description": "Historical 18 plus Npl and b/h",
+    "n_features": 20,
+    "feature_names": [
+      "R (%)",
+      "fy (MPa)",
+      "fc (MPa)",
+      "e1 (mm)",
+      "e2 (mm)",
+      "r0/h",
+      "b/t",
+      "Ac (mm^2)",
+      "As (mm^2)",
+      "Re (mm)",
+      "te (mm)",
+      "ke",
+      "xi",
+      "sigma_re (MPa)",
+      "lambda_bar",
+      "e/h",
+      "e1/e2",
+      "e_bar",
+      "Npl (kN)",
+      "b/h"
+    ],
+    "cv_composite_score": 1.7924952955458622,
+    "cv_rmse": 344.311922904128,
+    "cv_r2": 0.9825671734120274,
+    "cv_cov": 0.10417504755914957,
+    "test_rmse": 234.32673597227324,
+    "test_r2": 0.9899452956564906,
+    "test_cov": 0.09074289628204671,
+    "scale_npl_worst": {
+      "worst_cov_label": "scale_npl_q4",
+      "worst_cov": 0.10825045927671988,
+      "worst_rmse_label": "scale_npl_q5",
+      "worst_rmse": 447.2550285335786
+    },
+    "section_family_worst": {
+      "worst_cov_label": "rectangular",
+      "worst_cov": 0.10911355716174842,
+      "worst_rmse_label": "square",
+      "worst_rmse": 265.1935459869707
+    },
+    "slenderness_state_worst": {
+      "worst_cov_label": "slender",
+      "worst_cov": 0.1378441436907113,
+      "worst_rmse_label": "very_stocky",
+      "worst_rmse": 268.96462457167183
+    },
+    "eccentricity_severity_worst": {
+      "worst_cov_label": "large_ecc",
+      "worst_cov": 0.12294570693841578,
+      "worst_rmse_label": "moderate_ecc",
+      "worst_rmse": 252.62733634161205
+    }
+  },
+  {
+    "stage": "stage1",
+    "id": "D2_hist18_plus_b_over_h",
+    "description": "Historical 18 plus b/h",
+    "n_features": 19,
+    "feature_names": [
+      "R (%)",
+      "fy (MPa)",
+      "fc (MPa)",
+      "e1 (mm)",
+      "e2 (mm)",
+      "r0/h",
+      "b/t",
+      "Ac (mm^2)",
+      "As (mm^2)",
+      "Re (mm)",
+      "te (mm)",
+      "ke",
+      "xi",
+      "sigma_re (MPa)",
+      "lambda_bar",
+      "e/h",
+      "e1/e2",
+      "e_bar",
+      "b/h"
+    ],
+    "cv_composite_score": 2.0027594924637815,
+    "cv_rmse": 357.16685384626237,
+    "cv_r2": 0.981533922412904,
+    "cv_cov": 0.10477948670197745,
+    "test_rmse": 248.59364342255756,
+    "test_r2": 0.9886836685956107,
+    "test_cov": 0.09338934087756558,
+    "scale_npl_worst": {
+      "worst_cov_label": "scale_npl_q4",
+      "worst_cov": 0.10795500449278372,
+      "worst_rmse_label": "scale_npl_q5",
+      "worst_rmse": 479.057611640574
+    },
+    "section_family_worst": {
+      "worst_cov_label": "obround",
+      "worst_cov": 0.11477445063375495,
+      "worst_rmse_label": "square",
+      "worst_rmse": 311.5450227763928
+    },
+    "slenderness_state_worst": {
+      "worst_cov_label": "slender",
+      "worst_cov": 0.13618833716739906,
+      "worst_rmse_label": "very_stocky",
+      "worst_rmse": 284.9365446477976
+    },
+    "eccentricity_severity_worst": {
+      "worst_cov_label": "large_ecc",
+      "worst_cov": 0.13023029047357015,
+      "worst_rmse_label": "moderate_ecc",
+      "worst_rmse": 265.66793254806413
+    }
+  },
+  {
+    "stage": "stage1",
+    "id": "D1_hist18_plus_npl",
+    "description": "Historical 18 plus Npl",
+    "n_features": 19,
+    "feature_names": [
+      "R (%)",
+      "fy (MPa)",
+      "fc (MPa)",
+      "e1 (mm)",
+      "e2 (mm)",
+      "r0/h",
+      "b/t",
+      "Ac (mm^2)",
+      "As (mm^2)",
+      "Re (mm)",
+      "te (mm)",
+      "ke",
+      "xi",
+      "sigma_re (MPa)",
+      "lambda_bar",
+      "e/h",
+      "e1/e2",
+      "e_bar",
+      "Npl (kN)"
+    ],
+    "cv_composite_score": 2.042866448029402,
+    "cv_rmse": 358.24087885368897,
+    "cv_r2": 0.981335154686423,
+    "cv_cov": 0.10523995574257106,
+    "test_rmse": 236.80823242445055,
+    "test_r2": 0.9897312114563468,
+    "test_cov": 0.09316548951517711,
+    "scale_npl_worst": {
+      "worst_cov_label": "scale_npl_q4",
+      "worst_cov": 0.10788017053260779,
+      "worst_rmse_label": "scale_npl_q5",
+      "worst_rmse": 449.1568631635614
+    },
+    "section_family_worst": {
+      "worst_cov_label": "obround",
+      "worst_cov": 0.12056111416476363,
+      "worst_rmse_label": "square",
+      "worst_rmse": 266.8320499449466
+    },
+    "slenderness_state_worst": {
+      "worst_cov_label": "slender",
+      "worst_cov": 0.14159975069909422,
+      "worst_rmse_label": "slender",
+      "worst_rmse": 284.12863031334155
+    },
+    "eccentricity_severity_worst": {
+      "worst_cov_label": "large_ecc",
+      "worst_cov": 0.13707774344462073,
+      "worst_rmse_label": "moderate_ecc",
+      "worst_rmse": 254.23930531151132
+    }
+  },
+  {
+    "stage": "stage1",
+    "id": "D0_hist18",
+    "description": "Historical 18-feature baseline",
+    "n_features": 18,
+    "feature_names": [
+      "R (%)",
+      "fy (MPa)",
+      "fc (MPa)",
+      "e1 (mm)",
+      "e2 (mm)",
+      "r0/h",
+      "b/t",
+      "Ac (mm^2)",
+      "As (mm^2)",
+      "Re (mm)",
+      "te (mm)",
+      "ke",
+      "xi",
+      "sigma_re (MPa)",
+      "lambda_bar",
+      "e/h",
+      "e1/e2",
+      "e_bar"
+    ],
+    "cv_composite_score": 2.2253723605284335,
+    "cv_rmse": 366.9341235672015,
+    "cv_r2": 0.9804574482817108,
+    "cv_cov": 0.10527995989800301,
+    "test_rmse": 250.36280680944148,
+    "test_r2": 0.9885220258558602,
+    "test_cov": 0.09440581649923195,
+    "scale_npl_worst": {
+      "worst_cov_label": "scale_npl_q4",
+      "worst_cov": 0.11012997899073182,
+      "worst_rmse_label": "scale_npl_q5",
+      "worst_rmse": 484.6124416134779
+    },
+    "section_family_worst": {
+      "worst_cov_label": "square",
+      "worst_cov": 0.11058066412937204,
+      "worst_rmse_label": "square",
+      "worst_rmse": 298.69835480539706
+    },
+    "slenderness_state_worst": {
+      "worst_cov_label": "slender",
+      "worst_cov": 0.13464496182955676,
+      "worst_rmse_label": "very_stocky",
+      "worst_rmse": 291.7856476081619
+    },
+    "eccentricity_severity_worst": {
+      "worst_cov_label": "large_ecc",
+      "worst_cov": 0.13251528830477965,
+      "worst_rmse_label": "moderate_ecc",
+      "worst_rmse": 297.53514847183567
+    }
+  }
+]
