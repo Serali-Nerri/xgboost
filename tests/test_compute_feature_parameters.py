@@ -66,3 +66,24 @@ def test_compute_feature_parameters_allows_missing_nexp_and_leaves_psi_blank():
     assert "Nexp (kN)" not in mapping
     assert row[nexp_index] is None
     assert row[psi_index] is None
+
+
+def test_resolve_columns_supports_2026_03_11_new_header_aliases():
+    mapping = MODULE.resolve_columns(
+        [
+            "b (mm)",
+            "h (mm)",
+            "r0 (mm)",
+            "t (mm)",
+            "R（%)",
+            "fy (MPa)",
+            "fco (MPa)",
+            "L (mm)",
+            "e1 (mm)",
+            "e2 (mm)",
+            "Nexp (kN)",
+        ]
+    )
+
+    assert mapping["R (%)"] == "R（%)"
+    assert mapping["fc (MPa)"] == "fco (MPa)"

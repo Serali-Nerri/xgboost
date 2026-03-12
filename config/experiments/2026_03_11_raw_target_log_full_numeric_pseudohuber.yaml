@@ -1,0 +1,120 @@
+# 2026-03-11 dataset experiment: direct Nexp log-space training with full numeric geometry and pseudo-Huber loss
+
+data:
+  file_path: "data/processed/2026.3.11_feature_parameters_raw.csv"
+  target_column: "Nexp (kN)"
+  target_mode: "raw"
+
+  target_transform:
+    enabled: true
+    type: "log"
+
+  columns_to_drop: []
+
+  test_size: 0.2
+  random_state: 42
+
+  split:
+    strategy: "regression_stratified"
+    target_bins: 10
+    auxiliary_features:
+      - column: "lambda_bar"
+        bins: 3
+    min_stratum_size: 12
+
+model:
+  params:
+    objective: "reg:pseudohubererror"
+    max_depth: 4
+    learning_rate: 0.027911623918308065
+    n_estimators: 4442
+    subsample: 0.6967685743511401
+    colsample_bytree: 0.5347737941251787
+    min_child_weight: 4
+    reg_alpha: 0.11887950844631323
+    reg_lambda: 0.04795149312314335
+    gamma: 0.00012210030451141005
+    random_state: 42
+    tree_method: "hist"
+    device: "cpu"
+    n_jobs: -1
+
+  use_optuna: false
+  optuna_metric_space: "original"
+  cv_metric_space: "original"
+  n_trials: 120
+  optuna_timeout: 21600
+  optuna_storage_url: "sqlite:///logs/optuna_study.db"
+  best_params_path: "logs/best_params_raw_target_log_full_numeric_pseudohuber_20260311.json"
+
+  early_stopping_rounds: 100
+  eval_metric: "rmse"
+  validation_size: 0.15
+  selection_objective:
+    metric_space: "original_nexp"
+    rmse_normalizer: "mean_actual"
+    cov_threshold: 0.10
+    r2_threshold: 0.99
+    cov_weight: 2.0
+    r2_weight: 2.0
+
+cv:
+  n_splits: 5
+  random_state: 42
+  shuffle: true
+
+evaluation:
+  regime_analysis:
+    enabled: true
+    reference_split: "train"
+    sort_metric: "cov"
+    regimes:
+      - name: "axiality"
+        mode: "categorical"
+        source: "feature"
+        column: "axial_flag"
+      - name: "section_family"
+        mode: "categorical"
+        source: "feature"
+        column: "section_family"
+      - name: "slenderness_state"
+        mode: "fixed_bins"
+        source: "feature"
+        column: "lambda_bar"
+        edges: [0.0, 0.25, 0.5, 1.0, .inf]
+        labels: ["very_stocky", "stocky", "intermediate", "slender"]
+      - name: "scale_npl"
+        mode: "train_quantile"
+        source: "feature"
+        column: "Npl (kN)"
+        bins: 5
+      - name: "eccentricity_severity"
+        mode: "fixed_bins"
+        source: "feature"
+        column: "e/h"
+        edges: [0.0, 0.0, 0.1, 0.3, .inf]
+        labels: ["axial", "small_ecc", "moderate_ecc", "large_ecc"]
+      - name: "confinement_level"
+        mode: "fixed_bins"
+        source: "feature"
+        column: "xi"
+        edges: [0.0, 0.5, 1.5, 3.0, .inf]
+        labels: ["low_conf", "mid_conf", "high_conf", "very_high_conf"]
+        bins: 4
+
+paths:
+  output_dir: "output/2026_03_11/raw_target_log_full_numeric_pseudohuber"
+  model_dir: "models"
+  model_output: "xgboost_model.pkl"
+  preprocessor_output: "preprocessor.pkl"
+  feature_names_output: "feature_names.json"
+  metadata_output: "training_metadata.json"
+  feature_importance_plot: "feature_importance.png"
+  predictions_plot: "predictions_vs_actual.png"
+  evaluation_report: "evaluation_report.json"
+  logs_dir: "logs"
+
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file_name: "cfst_xgboost.log"

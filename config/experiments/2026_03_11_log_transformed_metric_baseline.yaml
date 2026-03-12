@@ -1,0 +1,126 @@
+# 2026-03-11 dataset baseline: log(psi)-space training + transformed-space reference metric
+
+data:
+  file_path: "data/processed/2026.3.11_feature_parameters_raw.csv"
+  target_column: "Nexp (kN)"
+  target_mode: "psi_over_npl"
+
+  target_transform:
+    enabled: true
+    type: "log"
+
+  columns_to_drop:
+    - "b (mm)"
+    - "h (mm)"
+    - "r0 (mm)"
+    - "t (mm)"
+    - "L (mm)"
+    - "lambda"
+
+  test_size: 0.2
+  random_state: 42
+
+  split:
+    strategy: "regression_stratified"
+    target_bins: 10
+    auxiliary_features:
+      - column: "lambda_bar"
+        bins: 3
+    min_stratum_size: 12
+
+model:
+  params:
+    objective: "reg:squarederror"
+    max_depth: 6
+    learning_rate: 0.04411666122575092
+    n_estimators: 4066
+    subsample: 0.7038011848542036
+    colsample_bytree: 0.4714919226150699
+    min_child_weight: 6
+    reg_alpha: 0.033505711876129954
+    reg_lambda: 0.1408673338811182
+    gamma: 0.00020676219564729034
+    random_state: 42
+    tree_method: "hist"
+    device: "cpu"
+    n_jobs: -1
+
+  use_optuna: false
+  optuna_metric_space: "transformed"
+  cv_metric_space: "transformed"
+  n_trials: 200
+  optuna_timeout: 14400
+  optuna_storage_url: "sqlite:///logs/optuna_study.db"
+  best_params_path: "logs/best_params_psi_over_npl_log_transformed_20260311_baseline.json"
+
+  early_stopping_rounds: 100
+  eval_metric: "rmse"
+  validation_size: 0.15
+  selection_objective:
+    metric_space: "original_nexp"
+    rmse_normalizer: "mean_actual"
+    cov_threshold: 0.10
+    r2_threshold: 0.99
+    cov_weight: 2.0
+    r2_weight: 2.0
+
+cv:
+  n_splits: 5
+  random_state: 42
+  shuffle: true
+
+evaluation:
+  regime_analysis:
+    enabled: true
+    reference_split: "train"
+    sort_metric: "cov"
+    regimes:
+      - name: "axiality"
+        mode: "categorical"
+        source: "feature"
+        column: "axial_flag"
+      - name: "section_family"
+        mode: "categorical"
+        source: "feature"
+        column: "section_family"
+      - name: "slenderness_state"
+        mode: "fixed_bins"
+        source: "feature"
+        column: "lambda_bar"
+        edges: [0.0, 0.25, 0.5, 1.0, .inf]
+        labels: ["very_stocky", "stocky", "intermediate", "slender"]
+      - name: "scale_npl"
+        mode: "train_quantile"
+        source: "feature"
+        column: "Npl (kN)"
+        bins: 5
+      - name: "eccentricity_severity"
+        mode: "fixed_bins"
+        source: "feature"
+        column: "e/h"
+        edges: [0.0, 0.0, 0.1, 0.3, .inf]
+        labels: ["axial", "small_ecc", "moderate_ecc", "large_ecc"]
+      - name: "confinement_level"
+        mode: "fixed_bins"
+        source: "feature"
+        column: "xi"
+        edges: [0.0, 0.5, 1.5, 3.0, .inf]
+        labels: ["low_conf", "mid_conf", "high_conf", "very_high_conf"]
+        bins: 4
+
+paths:
+  output_dir: "output/2026_03_11/psi_over_npl_log_transformed_baseline"
+  model_dir: "models"
+  model_output: "xgboost_model.pkl"
+  preprocessor_output: "preprocessor.pkl"
+  feature_names_output: "feature_names.json"
+  metadata_output: "training_metadata.json"
+  feature_importance_plot: "feature_importance.png"
+  predictions_plot: "predictions_vs_actual.png"
+  evaluation_report: "evaluation_report.json"
+  logs_dir: "logs"
+
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file_name: "cfst_xgboost.log"

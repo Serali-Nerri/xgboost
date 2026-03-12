@@ -103,3 +103,27 @@ def test_load_data_builds_psi_target_and_derived_columns(tmp_path):
     assert "section_family" in features.columns
     assert np.allclose(target.to_numpy(dtype=float), np.array([1.0, 0.8]))
     assert loader.training_target_name == "psi"
+
+
+def test_load_data_excludes_persisted_psi_for_raw_target_mode(tmp_path):
+    csv_path = tmp_path / "data.csv"
+    df = pd.DataFrame(
+        {
+            "feat": [1.0, 2.0],
+            "Npl (kN)": [10.0, 10.0],
+            "psi": [1.2, 1.3],
+            "Nexp (kN)": [12.0, 13.0],
+        }
+    )
+    df.to_csv(csv_path, index=False)
+
+    loader = DataLoader(required_columns=["Nexp (kN)"])
+    features, target = loader.load_data(
+        str(csv_path),
+        "Nexp (kN)",
+        target_transform=None,
+        target_mode="raw",
+    )
+
+    assert list(features.columns) == ["feat", "Npl (kN)"]
+    assert np.allclose(target.to_numpy(dtype=float), np.array([12.0, 13.0]))

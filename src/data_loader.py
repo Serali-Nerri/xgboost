@@ -10,6 +10,7 @@ from typing import Tuple, List, Optional
 from pathlib import Path
 
 from src.domain_features import (
+    PSI_COLUMN,
     apply_target_transform,
     compute_training_target,
     ensure_target_mode_columns,
@@ -118,6 +119,9 @@ class DataLoader:
         columns_to_exclude = {target_column}
         if self.training_target_name in df.columns and self.training_target_name != target_column:
             columns_to_exclude.add(self.training_target_name)
+        if self.training_target_name != PSI_COLUMN and PSI_COLUMN in df.columns:
+            # Avoid leaking a target-derived helper column into non-psi training modes.
+            columns_to_exclude.add(PSI_COLUMN)
 
         self.features_df = df.drop(columns=sorted(columns_to_exclude)).copy()
         self.feature_names = self.features_df.columns.tolist()
