@@ -50,6 +50,7 @@ model:
   early_stopping_rounds: 100
   eval_metric: "rmse"
   validation_size: 0.15
+  final_n_estimators_override: 4600
   selection_objective:
     metric_space: "original_nexp"
     rmse_normalizer: "mean_actual"

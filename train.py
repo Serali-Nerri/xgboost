@@ -36,7 +36,12 @@ from src.domain_features import (
 from src.utils.logger import setup_logger
 from src.data_loader import DataLoader
 from src.preprocessor import Preprocessor
-from src.model_trainer import ModelTrainer, OPTUNA_SEARCH_SPACE_VERSION
+from src.model_trainer import (
+    ModelTrainer,
+    OPTUNA_SEARCH_SPACE_VERSION,
+    _calculate_regression_metrics,
+    _calculate_selection_objective,
+)
 from src.evaluator import Evaluator
 from src.tail_residual_model import (
     TailResidualEnsemble,
@@ -110,6 +115,7 @@ def build_training_context(
     split_config: Dict[str, Any],
     sample_weight_config: Dict[str, Any],
     tail_residual_config: Dict[str, Any],
+    final_n_estimators_override: Optional[int],
     validation_size: float,
     early_stopping_rounds: Optional[int],
     eval_metric: Optional[str],
@@ -131,6 +137,7 @@ def build_training_context(
         "split_config": split_config,
         "sample_weight_config": sample_weight_config,
         "tail_residual_config": tail_residual_config,
+        "final_n_estimators_override": final_n_estimators_override,
         "validation_size": validation_size,
         "early_stopping_rounds": early_stopping_rounds,
         "eval_metric": eval_metric,
@@ -160,6 +167,7 @@ def build_optuna_tuning_fingerprint(
     split_config: Dict[str, Any],
     sample_weight_config: Dict[str, Any],
     tail_residual_config: Dict[str, Any],
+    final_n_estimators_override: Optional[int],
     validation_size: float,
     early_stopping_rounds: Optional[int],
     eval_metric: Optional[str],
@@ -174,6 +182,7 @@ def build_optuna_tuning_fingerprint(
         "split_config": split_config,
         "sample_weight_config": sample_weight_config,
         "tail_residual_config": tail_residual_config,
+        "final_n_estimators_override": final_n_estimators_override,
         "validation_size": validation_size,
         "early_stopping_rounds": early_stopping_rounds,
         "eval_metric": eval_metric,
@@ -507,6 +516,27 @@ def select_final_n_estimators(cv_results: Dict[str, Any], fallback: int) -> Tupl
     return int(np.median(np.asarray(best_iterations, dtype=int))), best_iterations
 
 
+def resolve_final_n_estimators(
+    model_config: Dict[str, Any],
+    cv_results: Dict[str, Any],
+    fallback: int,
+) -> Tuple[int, List[int], str]:
+    """Resolve the final global-stage tree count from CV or an explicit override."""
+    final_n_estimators, fold_best_iterations = select_final_n_estimators(
+        cv_results,
+        fallback=fallback,
+    )
+    override_value = model_config.get("final_n_estimators_override")
+    if override_value is None:
+        return final_n_estimators, fold_best_iterations, "cv_median"
+
+    if isinstance(override_value, bool) or not isinstance(override_value, int):
+        raise ValueError("config.model.final_n_estimators_override must be an integer")
+    if override_value <= 0:
+        raise ValueError("config.model.final_n_estimators_override must be positive")
+    return int(override_value), fold_best_iterations, "config_override"
+
+
 def build_cv_splitter(
     cv_config: Dict[str, Any], split_strategy: str
 ) -> KFold:
@@ -536,6 +566,453 @@ def build_cv_splitter(
         shuffle=shuffle,
         random_state=splitter_random_state,
     )
+
+
+def build_predictor_metadata(
+    target_metadata: Dict[str, Any],
+    model_family: str,
+    tail_residual_metadata: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Build metadata consumed by Predictor for single- and two-stage models."""
+    return {
+        **target_metadata,
+        "prediction_output_in_report_space": bool(
+            tail_residual_metadata.get("enabled", False)
+        ),
+        "model_family": model_family,
+        "tail_residual_correction": tail_residual_metadata,
+    }
+
+
+def fit_pipeline_model_on_split(
+    *,
+    trainer: ModelTrainer,
+    X_train_raw: pd.DataFrame,
+    y_train_trans: pd.Series,
+    y_train_report: pd.Series,
+    X_eval_raw: pd.DataFrame,
+    sample_weight_train: Optional[pd.Series],
+    columns_to_drop: List[str],
+    target_metadata: Dict[str, Any],
+    target_mode: str,
+    target_transform_type: Optional[str],
+    tail_residual_config: Dict[str, Any],
+    selection_objective_config: Dict[str, Any],
+    log_details: bool = True,
+) -> Dict[str, Any]:
+    """Fit the complete configured pipeline on one split and predict on an eval split."""
+    preprocessor = Preprocessor(columns_to_drop=columns_to_drop)
+    X_train_processed = preprocessor.fit_transform(X_train_raw)
+    X_eval_processed = preprocessor.transform(X_eval_raw)
+
+    feature_names = preprocessor.get_remaining_features()
+    if log_details:
+        logger.info(
+            "Preprocessing completed: %s features remaining",
+            len(X_train_processed.columns),
+        )
+        logger.info("Remaining features: %s", feature_names)
+
+    missing_info_train = preprocessor.check_missing_values(X_train_processed)
+    missing_info_eval = preprocessor.check_missing_values(X_eval_processed)
+    if log_details:
+        if missing_info_train or missing_info_eval:
+            logger.warning(
+                "Found missing values - Train: %s, Eval: %s",
+                missing_info_train,
+                missing_info_eval,
+            )
+        else:
+            logger.info("No missing values found in train or eval sets")
+
+    global_model = trainer.train(
+        X_train_processed,
+        y_train_trans,
+        sample_weight=sample_weight_train,
+        eval_set=None,
+        early_stopping_rounds=None,
+        eval_metric=None,
+    )
+    global_train_pred_trans = np.asarray(
+        global_model.predict(X_train_processed),
+        dtype=float,
+    ).reshape(-1)
+    global_eval_pred_trans = np.asarray(
+        global_model.predict(X_eval_processed),
+        dtype=float,
+    ).reshape(-1)
+    global_train_pred_orig = restore_report_target(
+        global_train_pred_trans,
+        target_mode=target_mode,
+        target_transform_type=target_transform_type,
+        reference_features=X_train_processed,
+    )
+    global_eval_pred_orig = restore_report_target(
+        global_eval_pred_trans,
+        target_mode=target_mode,
+        target_transform_type=target_transform_type,
+        reference_features=X_eval_processed,
+    )
+
+    model: Any = global_model
+    model_family = "single_stage_xgb"
+    tail_residual_metadata: Dict[str, Any] = {"enabled": False}
+    if tail_residual_config.get("enabled", False):
+        tail_feature_column = str(tail_residual_config["feature_column"])
+        if tail_feature_column not in X_train_processed.columns:
+            raise ValueError(
+                f"Tail residual feature '{tail_feature_column}' was removed by preprocessing. "
+                "Disable the tail correction or keep this feature in the model input."
+            )
+
+        tail_threshold = fit_tail_threshold(
+            cast(pd.Series, X_train_processed[tail_feature_column]),
+            tail_residual_config,
+        )
+        gating_config = cast(Dict[str, Any], tail_residual_config["gating"])
+        tail_gate_upper_threshold = None
+        if gating_config["mode"] == "soft_linear":
+            tail_gate_upper_threshold = resolve_threshold_from_config(
+                cast(pd.Series, X_train_processed[tail_feature_column]),
+                gating_config,
+            )
+            if float(tail_gate_upper_threshold) <= float(tail_threshold):
+                raise ValueError(
+                    "Tail gating upper threshold must be greater than the tail threshold"
+                )
+
+        tail_train_mask = (
+            X_train_processed[tail_feature_column].to_numpy(dtype=float) >= tail_threshold
+        )
+        tail_train_count = int(np.sum(tail_train_mask))
+        if tail_train_count < 20:
+            raise ValueError(
+                "Tail residual correction produced too few tail training samples: "
+                f"{tail_train_count}"
+            )
+
+        tail_target = build_tail_training_target(
+            y_train_report.to_numpy(dtype=float)[tail_train_mask],
+            global_train_pred_orig[tail_train_mask],
+            correction_mode=str(tail_residual_config["correction_mode"]),
+        )
+        tail_train_features = augment_tail_features(
+            X_train_processed.loc[tail_train_mask].copy(),
+            global_prediction_report=global_train_pred_orig[tail_train_mask],
+            append_global_prediction_features=bool(
+                tail_residual_config["append_global_prediction_features"]
+            ),
+        )
+        tail_params = (
+            tail_residual_config["params"].copy()
+            if tail_residual_config.get("params") is not None
+            else trainer.params.copy()
+        )
+        tail_trainer = ModelTrainer(
+            params=tail_params,
+            use_optuna=False,
+            best_params_path="logs/unused_tail_residual_params.json",
+            optuna_metric_space="original",
+            target_transform_type=None,
+            target_mode="raw",
+            columns_to_drop=[],
+            validation_size=0.0,
+            early_stopping_rounds=None,
+            eval_metric=None,
+            selection_objective=selection_objective_config,
+        )
+        tail_model = tail_trainer.train(
+            tail_train_features,
+            pd.Series(
+                tail_target,
+                index=X_train_processed.index[tail_train_mask],
+                dtype=float,
+            ),
+            eval_set=None,
+            early_stopping_rounds=None,
+            eval_metric=None,
+        )
+        model = TailResidualEnsemble(
+            global_model=global_model,
+            tail_model=tail_model,
+            tail_feature_name=tail_feature_column,
+            tail_threshold=tail_threshold,
+            target_mode=target_mode,
+            target_transform_type=target_transform_type,
+            correction_mode=str(tail_residual_config["correction_mode"]),
+            append_global_prediction_features=bool(
+                tail_residual_config["append_global_prediction_features"]
+            ),
+            gating_mode=str(gating_config["mode"]),
+            tail_gate_upper_threshold=tail_gate_upper_threshold,
+            report_prediction_min=tail_residual_config["report_prediction_min"],
+            metadata={
+                "feature_column": tail_feature_column,
+                "threshold_mode": tail_residual_config["threshold_mode"],
+            },
+        )
+        model_family = "tail_residual_ensemble"
+        tail_residual_metadata = {
+            "enabled": True,
+            "feature_column": tail_feature_column,
+            "threshold_mode": tail_residual_config["threshold_mode"],
+            "threshold_value": tail_threshold,
+            "threshold_source": (
+                f"train_quantile_{tail_residual_config['quantile']:.4f}"
+                if tail_residual_config["threshold_mode"] == "train_quantile"
+                else "fixed_value"
+            ),
+            "tail_train_sample_count": tail_train_count,
+            "tail_train_sample_fraction": tail_train_count / max(len(X_train_processed), 1),
+            "correction_mode": tail_residual_config["correction_mode"],
+            "append_global_prediction_features": bool(
+                tail_residual_config["append_global_prediction_features"]
+            ),
+            "gating_mode": gating_config["mode"],
+            "gating_upper_threshold_value": tail_gate_upper_threshold,
+            "gating_upper_threshold_source": (
+                (
+                    f"train_quantile_{gating_config['quantile']:.4f}"
+                    if gating_config["threshold_mode"] == "train_quantile"
+                    else "fixed_value"
+                )
+                if gating_config["mode"] == "soft_linear"
+                else None
+            ),
+            "global_model_params": trainer.params.copy(),
+            "tail_residual_model_params": tail_params.copy(),
+            "tail_target_space": tail_residual_config["correction_mode"],
+        }
+        if log_details:
+            logger.info(
+                "Tail residual model trained on %s samples (%.2f%%) with %s >= %.6f "
+                "(correction_mode=%s, gating=%s)",
+                tail_train_count,
+                100.0 * tail_residual_metadata["tail_train_sample_fraction"],
+                tail_feature_column,
+                tail_threshold,
+                tail_residual_config["correction_mode"],
+                gating_config["mode"],
+            )
+
+    predictor_metadata = build_predictor_metadata(
+        target_metadata,
+        model_family,
+        tail_residual_metadata,
+    )
+
+    from src.predictor import Predictor
+
+    predictor = Predictor(model, preprocessor, feature_names, metadata=predictor_metadata)
+    y_train_pred_orig = predictor.predict(X_train_raw)
+    y_eval_pred_orig = predictor.predict(X_eval_raw)
+    return {
+        "model": model,
+        "preprocessor": preprocessor,
+        "feature_names": feature_names,
+        "model_family": model_family,
+        "tail_residual_metadata": tail_residual_metadata,
+        "predictor_metadata": predictor_metadata,
+        "global_train_pred_trans": global_train_pred_trans,
+        "global_eval_pred_trans": global_eval_pred_trans,
+        "global_train_pred_orig": global_train_pred_orig,
+        "global_eval_pred_orig": global_eval_pred_orig,
+        "y_train_pred_orig": y_train_pred_orig,
+        "y_eval_pred_orig": y_eval_pred_orig,
+    }
+
+
+def cross_validate_full_pipeline(
+    *,
+    trainer: ModelTrainer,
+    X: pd.DataFrame,
+    y: pd.Series,
+    y_report: pd.Series,
+    cv: KFold,
+    sample_weight: Optional[pd.Series],
+    stratify_labels: Optional[pd.Series],
+    columns_to_drop: List[str],
+    target_column: str,
+    target_mode: str,
+    target_transform_type: Optional[str],
+    derived_columns: List[str],
+    tail_residual_config: Dict[str, Any],
+    selection_objective: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Cross-validate the complete configured pipeline, including tail residual correction."""
+    splitter = cv
+    n_folds = splitter.get_n_splits(X, y, None)
+    fold_scores: List[float] = []
+    fold_rmse: List[float] = []
+    fold_r2: List[float] = []
+    fold_cov: List[float] = []
+    fold_details: List[Dict[str, Any]] = []
+    start_time = pd.Timestamp.now()
+
+    target_metadata = build_target_metadata(
+        report_target_column=target_column,
+        target_mode=target_mode,
+        target_transform_type=target_transform_type,
+        derived_columns=derived_columns,
+    )
+    fallback_n_estimators = int(trainer.params.get("n_estimators", 1000))
+    cv_target = stratify_labels if stratify_labels is not None else y
+
+    for fold_index, (train_idx, test_idx) in enumerate(splitter.split(X, cv_target)):
+        X_train_fold_raw = X.iloc[train_idx].copy()
+        X_test_fold_raw = X.iloc[test_idx].copy()
+        y_train_fold = y.iloc[train_idx].copy()
+        y_test_fold = y.iloc[test_idx].copy()
+        y_train_report = y_report.iloc[train_idx].copy()
+        y_test_report = y_report.iloc[test_idx].copy()
+        fold_strata = (
+            stratify_labels.iloc[train_idx].copy()
+            if stratify_labels is not None
+            else None
+        )
+        fold_sample_weight = (
+            sample_weight.iloc[train_idx].copy()
+            if sample_weight is not None
+            else None
+        )
+
+        (
+            X_fit_raw,
+            X_val_raw,
+            y_fit,
+            y_val,
+            sample_weight_fit,
+            sample_weight_val,
+        ) = trainer._split_train_validation(
+            X_train_fold_raw,
+            y_train_fold,
+            fold_index,
+            stratify_labels=fold_strata,
+            sample_weight_fold=fold_sample_weight,
+        )
+
+        fold_best_iteration = None
+        if X_val_raw is not None and y_val is not None:
+            selection_preprocessor = Preprocessor(columns_to_drop=columns_to_drop)
+            X_fit = selection_preprocessor.fit_transform(X_fit_raw)
+            X_val = selection_preprocessor.transform(X_val_raw)
+            selection_model = trainer._fit_model(
+                params=trainer.params,
+                X_train=X_fit,
+                y_train=y_fit,
+                sample_weight_train=sample_weight_fit,
+                X_val=X_val,
+                y_val=y_val,
+                sample_weight_val=sample_weight_val,
+                early_stopping_rounds=trainer.early_stopping_rounds,
+                eval_metric=trainer.eval_metric,
+            )
+            fold_best_iteration = getattr(selection_model, "best_iteration", None)
+
+        fold_n_estimators = (
+            int(fold_best_iteration) + 1
+            if fold_best_iteration is not None
+            else fallback_n_estimators
+        )
+        fold_trainer = ModelTrainer(
+            params={**trainer.params.copy(), "n_estimators": fold_n_estimators},
+            use_optuna=False,
+            best_params_path="logs/unused_cv_pipeline_params.json",
+            optuna_metric_space=trainer.optuna_metric_space,
+            target_transform_type=target_transform_type,
+            target_mode=target_mode,
+            columns_to_drop=columns_to_drop,
+            validation_size=0.0,
+            early_stopping_rounds=None,
+            eval_metric=None,
+            selection_objective=selection_objective,
+        )
+        fold_result = fit_pipeline_model_on_split(
+            trainer=fold_trainer,
+            X_train_raw=X_train_fold_raw,
+            y_train_trans=y_train_fold,
+            y_train_report=y_train_report,
+            X_eval_raw=X_test_fold_raw,
+            sample_weight_train=fold_sample_weight,
+            columns_to_drop=columns_to_drop,
+            target_metadata=target_metadata,
+            target_mode=target_mode,
+            target_transform_type=target_transform_type,
+            tail_residual_config=tail_residual_config,
+            selection_objective_config=selection_objective,
+            log_details=False,
+        )
+
+        report_metrics = _calculate_regression_metrics(
+            y_test_report.to_numpy(dtype=float),
+            fold_result["y_eval_pred_orig"],
+        )
+        fold_score = _calculate_selection_objective(
+            report_metrics,
+            selection_objective,
+        )
+        transformed_rmse = float(
+            np.sqrt(
+                np.mean(
+                    (
+                        y_test_fold.to_numpy(dtype=float)
+                        - fold_result["global_eval_pred_trans"]
+                    )
+                    ** 2
+                )
+            )
+        )
+        fold_scores.append(float(fold_score))
+        fold_rmse.append(float(cast(float, report_metrics["rmse"])))
+        fold_r2.append(float(cast(float, report_metrics["r2"])))
+        if report_metrics["cov"] is not None:
+            fold_cov.append(float(report_metrics["cov"]))
+        fold_details.append(
+            {
+                "fold": fold_index + 1,
+                "selection_score": float(fold_score),
+                "rmse_original_space": report_metrics["rmse"],
+                "r2_original_space": report_metrics["r2"],
+                "cov_original_space": report_metrics["cov"],
+                "rmse_training_space": transformed_rmse,
+                "n_train_outer": int(len(train_idx)),
+                "n_test_outer": int(len(test_idx)),
+                "n_train_inner": int(len(X_fit_raw)),
+                "n_validation_inner": int(len(X_val_raw)) if X_val_raw is not None else 0,
+                "best_iteration": fold_best_iteration,
+                "selected_n_estimators": fold_n_estimators,
+                "model_family": fold_result["model_family"],
+                "tail_train_sample_count": int(
+                    fold_result["tail_residual_metadata"].get("tail_train_sample_count", 0)
+                ),
+            }
+        )
+
+    cv_scores = np.asarray(fold_scores, dtype=float)
+    cv_time = (pd.Timestamp.now() - start_time).total_seconds()
+    return {
+        "cv_scores": cv_scores,
+        "mean_cv_score": float(np.mean(cv_scores)),
+        "std_cv_score": float(np.std(cv_scores)),
+        "max_cv_score": float(np.max(cv_scores)),
+        "min_cv_score": float(np.min(cv_scores)),
+        "mean_cv_rmse": float(np.mean(fold_rmse)) if fold_rmse else None,
+        "std_cv_rmse": float(np.std(fold_rmse)) if fold_rmse else None,
+        "mean_cv_r2": float(np.mean(fold_r2)) if fold_r2 else None,
+        "std_cv_r2": float(np.std(fold_r2)) if fold_r2 else None,
+        "mean_cv_cov": float(np.mean(fold_cov)) if fold_cov else None,
+        "std_cv_cov": float(np.std(fold_cov)) if fold_cov else None,
+        "cv_time": cv_time,
+        "n_folds": n_folds,
+        "fold_details": fold_details,
+        "metric_space": "original",
+        "target_mode": target_mode,
+        "selection_objective": selection_objective,
+        "validation_size": trainer.validation_size,
+        "early_stopping_rounds": trainer.early_stopping_rounds,
+        "eval_metric": trainer.eval_metric,
+        "model_family": "tail_residual_ensemble",
+    }
 
 
 def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str, Any]:
@@ -607,6 +1084,10 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
         validation_size = float(model_config.get("validation_size", 0.1) or 0.0)
         early_stopping_rounds = model_config.get("early_stopping_rounds")
         eval_metric = model_config.get("eval_metric")
+        final_n_estimators_override = cast(
+            Optional[int],
+            model_config.get("final_n_estimators_override"),
+        )
         selection_objective_config = cast(
             Dict[str, Any],
             model_config.get("selection_objective", {}),
@@ -651,6 +1132,7 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
             split_config=split_config,
             sample_weight_config=sample_weight_config,
             tail_residual_config=tail_residual_config,
+            final_n_estimators_override=final_n_estimators_override,
             validation_size=validation_size,
             early_stopping_rounds=early_stopping_rounds,
             eval_metric=eval_metric,
@@ -666,6 +1148,7 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
             split_config,
             sample_weight_config,
             tail_residual_config,
+            final_n_estimators_override,
             validation_size,
             early_stopping_rounds,
             eval_metric,
@@ -925,226 +1408,104 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
             }
 
         logger.info("\nStep 4.5: Performing cross-validation on training data...")
-        cv_results = trainer.cross_validate(
-            X_train_full,
-            y_train_trans_full,
-            y_report=y_train_report_full,
-            sample_weight=effective_global_sample_weight,
-            cv=cv_splitter,
-            metric_space=cv_metric_space,
-            target_transform_type=target_transform_type,
-            stratify_labels=train_strata_full,
-        )
+        if tail_residual_config.get("enabled", False):
+            logger.info(
+                "Cross-validation will score the full tail-residual pipeline, not only the global stage"
+            )
+            cv_results = cross_validate_full_pipeline(
+                trainer=trainer,
+                X=X_train_full,
+                y=y_train_trans_full,
+                y_report=y_train_report_full,
+                cv=cv_splitter,
+                sample_weight=effective_global_sample_weight,
+                stratify_labels=train_strata_full,
+                columns_to_drop=columns_to_drop,
+                target_column=target_column,
+                target_mode=target_mode,
+                target_transform_type=target_transform_type,
+                derived_columns=data_loader.derived_columns,
+                tail_residual_config=tail_residual_config,
+                selection_objective=selection_objective_config,
+            )
+        else:
+            cv_results = trainer.cross_validate(
+                X_train_full,
+                y_train_trans_full,
+                y_report=y_train_report_full,
+                sample_weight=effective_global_sample_weight,
+                cv=cv_splitter,
+                metric_space=cv_metric_space,
+                target_transform_type=target_transform_type,
+                stratify_labels=train_strata_full,
+            )
         logger.info(
             "Cross-validation composite score "
-            f"({cv_metric_space} space): {cv_results['mean_cv_score']:.4f} "
+            f"({cv_results['metric_space']} space): {cv_results['mean_cv_score']:.4f} "
             f"(+/- {cv_results['std_cv_score']:.4f})"
         )
 
-        final_n_estimators, fold_best_iterations = select_final_n_estimators(
+        (
+            final_n_estimators,
+            fold_best_iterations,
+            final_n_estimators_source,
+        ) = resolve_final_n_estimators(
+            model_config,
             cv_results,
             fallback=int(trainer.params.get("n_estimators", xgb_params["n_estimators"])),
         )
         trainer.params["n_estimators"] = final_n_estimators
         logger.info(
-            "Selected final n_estimators=%s from CV fold best_iteration values=%s",
+            "Selected final n_estimators=%s (%s) from CV fold best_iteration values=%s",
             final_n_estimators,
+            final_n_estimators_source,
             fold_best_iterations,
         )
 
         logger.info("\nStep 5: Fitting final model on full training split...")
-        preprocessor = Preprocessor(columns_to_drop=columns_to_drop)
-        X_train_processed = preprocessor.fit_transform(X_train_full)
-        X_test_processed = preprocessor.transform(X_test)
-        logger.info(
-            f"Preprocessing completed: {len(X_train_processed.columns)} features remaining"
-        )
-
-        feature_names = preprocessor.get_remaining_features()
-        logger.info(f"Remaining features: {feature_names}")
-
-        missing_info_train = preprocessor.check_missing_values(X_train_processed)
-        missing_info_test = preprocessor.check_missing_values(X_test_processed)
-        if missing_info_train or missing_info_test:
-            logger.warning(
-                f"Found missing values - Train: {missing_info_train}, Test: {missing_info_test}"
-            )
-        else:
-            logger.info("No missing values found in train or test sets")
-
-        model = trainer.train(
-            X_train_processed,
-            y_train_trans_full,
-            sample_weight=effective_global_sample_weight,
-            eval_set=None,
-            early_stopping_rounds=None,
-            eval_metric=None,
-        )
         target_metadata = build_target_metadata(
             report_target_column=target_column,
             target_mode=target_mode,
             target_transform_type=target_transform_type,
             derived_columns=data_loader.derived_columns,
         )
-
+        final_fit = fit_pipeline_model_on_split(
+            trainer=trainer,
+            X_train_raw=X_train_full,
+            y_train_trans=y_train_trans_full,
+            y_train_report=y_train_report_full,
+            X_eval_raw=X_test,
+            sample_weight_train=effective_global_sample_weight,
+            columns_to_drop=columns_to_drop,
+            target_metadata=target_metadata,
+            target_mode=target_mode,
+            target_transform_type=target_transform_type,
+            tail_residual_config=tail_residual_config,
+            selection_objective_config=selection_objective_config,
+            log_details=True,
+        )
+        model = final_fit["model"]
+        preprocessor = final_fit["preprocessor"]
+        feature_names = cast(List[str], final_fit["feature_names"])
+        model_family = str(final_fit["model_family"])
+        tail_residual_metadata = cast(Dict[str, Any], final_fit["tail_residual_metadata"])
+        predictor_metadata = cast(Dict[str, Any], final_fit["predictor_metadata"])
         global_train_pred_trans = np.asarray(
-            model.predict(X_train_processed),
+            final_fit["global_train_pred_trans"],
             dtype=float,
         ).reshape(-1)
         global_test_pred_trans = np.asarray(
-            model.predict(X_test_processed),
+            final_fit["global_eval_pred_trans"],
             dtype=float,
         ).reshape(-1)
-        global_train_pred_orig = restore_report_target(
-            global_train_pred_trans,
-            target_mode=target_mode,
-            target_transform_type=target_transform_type,
-            reference_features=X_train_processed,
-        )
-        global_test_pred_orig = restore_report_target(
-            global_test_pred_trans,
-            target_mode=target_mode,
-            target_transform_type=target_transform_type,
-            reference_features=X_test_processed,
-        )
-
-        model_family = "single_stage_xgb"
-        tail_residual_metadata: Dict[str, Any] = {"enabled": False}
-        if tail_residual_config.get("enabled", False):
-            tail_feature_column = str(tail_residual_config["feature_column"])
-            if tail_feature_column not in X_train_processed.columns:
-                raise ValueError(
-                    f"Tail residual feature '{tail_feature_column}' was removed by preprocessing. "
-                    "Disable the tail correction or keep this feature in the model input."
-                )
-
-            tail_threshold = fit_tail_threshold(
-                cast(pd.Series, X_train_processed[tail_feature_column]),
-                tail_residual_config,
-            )
-            gating_config = cast(Dict[str, Any], tail_residual_config["gating"])
-            tail_gate_upper_threshold = None
-            if gating_config["mode"] == "soft_linear":
-                tail_gate_upper_threshold = resolve_threshold_from_config(
-                    cast(pd.Series, X_train_processed[tail_feature_column]),
-                    gating_config,
-                )
-                if float(tail_gate_upper_threshold) <= float(tail_threshold):
-                    raise ValueError(
-                        "Tail gating upper threshold must be greater than the tail threshold"
-                    )
-            tail_train_mask = (
-                X_train_processed[tail_feature_column].to_numpy(dtype=float) >= tail_threshold
-            )
-            tail_train_count = int(np.sum(tail_train_mask))
-            if tail_train_count < 20:
-                raise ValueError(
-                    "Tail residual correction produced too few tail training samples: "
-                    f"{tail_train_count}"
-                )
-
-            tail_target = build_tail_training_target(
-                y_train_report_full.to_numpy(dtype=float)[tail_train_mask],
-                global_train_pred_orig[tail_train_mask],
-                correction_mode=str(tail_residual_config["correction_mode"]),
-            )
-            tail_train_features = augment_tail_features(
-                X_train_processed.loc[tail_train_mask].copy(),
-                global_prediction_report=global_train_pred_orig[tail_train_mask],
-                append_global_prediction_features=bool(
-                    tail_residual_config["append_global_prediction_features"]
-                ),
-            )
-            tail_params = (
-                tail_residual_config["params"].copy()
-                if tail_residual_config.get("params") is not None
-                else trainer.params.copy()
-            )
-            tail_trainer = ModelTrainer(
-                params=tail_params,
-                use_optuna=False,
-                best_params_path="logs/unused_tail_residual_params.json",
-                optuna_metric_space="original",
-                target_transform_type=None,
-                target_mode="raw",
-                columns_to_drop=[],
-                validation_size=0.0,
-                early_stopping_rounds=None,
-                eval_metric=None,
-                selection_objective=selection_objective_config,
-            )
-            tail_model = tail_trainer.train(
-                tail_train_features,
-                pd.Series(
-                    tail_target,
-                    index=X_train_processed.index[tail_train_mask],
-                    dtype=float,
-                ),
-                eval_set=None,
-                early_stopping_rounds=None,
-                eval_metric=None,
-            )
-            model = TailResidualEnsemble(
-                global_model=model,
-                tail_model=tail_model,
-                tail_feature_name=tail_feature_column,
-                tail_threshold=tail_threshold,
-                target_mode=target_mode,
-                target_transform_type=target_transform_type,
-                correction_mode=str(tail_residual_config["correction_mode"]),
-                append_global_prediction_features=bool(
-                    tail_residual_config["append_global_prediction_features"]
-                ),
-                gating_mode=str(gating_config["mode"]),
-                tail_gate_upper_threshold=tail_gate_upper_threshold,
-                report_prediction_min=tail_residual_config["report_prediction_min"],
-                metadata={
-                    "feature_column": tail_feature_column,
-                    "threshold_mode": tail_residual_config["threshold_mode"],
-                },
-            )
-            model_family = "tail_residual_ensemble"
-            tail_residual_metadata = {
-                "enabled": True,
-                "feature_column": tail_feature_column,
-                "threshold_mode": tail_residual_config["threshold_mode"],
-                "threshold_value": tail_threshold,
-                "threshold_source": (
-                    f"train_quantile_{tail_residual_config['quantile']:.4f}"
-                    if tail_residual_config["threshold_mode"] == "train_quantile"
-                    else "fixed_value"
-                ),
-                "tail_train_sample_count": tail_train_count,
-                "tail_train_sample_fraction": tail_train_count / max(len(X_train_processed), 1),
-                "correction_mode": tail_residual_config["correction_mode"],
-                "append_global_prediction_features": bool(
-                    tail_residual_config["append_global_prediction_features"]
-                ),
-                "gating_mode": gating_config["mode"],
-                "gating_upper_threshold_value": tail_gate_upper_threshold,
-                "gating_upper_threshold_source": (
-                    (
-                        f"train_quantile_{gating_config['quantile']:.4f}"
-                        if gating_config["threshold_mode"] == "train_quantile"
-                        else "fixed_value"
-                    )
-                    if gating_config["mode"] == "soft_linear"
-                    else None
-                ),
-                "global_model_params": trainer.params.copy(),
-                "tail_residual_model_params": tail_params.copy(),
-                "tail_target_space": tail_residual_config["correction_mode"],
-            }
-            logger.info(
-                "Tail residual model trained on %s samples (%.2f%%) with %s >= %.6f "
-                "(correction_mode=%s, gating=%s)",
-                tail_train_count,
-                100.0 * tail_residual_metadata["tail_train_sample_fraction"],
-                tail_feature_column,
-                tail_threshold,
-                tail_residual_config["correction_mode"],
-                gating_config["mode"],
-            )
+        y_train_pred_orig = np.asarray(
+            final_fit["y_train_pred_orig"],
+            dtype=float,
+        ).reshape(-1)
+        y_test_pred_orig = np.asarray(
+            final_fit["y_eval_pred_orig"],
+            dtype=float,
+        ).reshape(-1)
         logger.info(
             "Final model training completed on target space: "
             f"{format_target_space_description(target_column, target_mode, target_transform_type)}"
@@ -1159,21 +1520,6 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
             regime_config=regime_config,
         )
 
-        predictor_metadata = {
-            **target_metadata,
-            "prediction_output_in_report_space": bool(
-                tail_residual_metadata.get("enabled", False)
-            ),
-            "model_family": model_family,
-            "tail_residual_correction": tail_residual_metadata,
-        }
-
-        # Make predictions on BOTH sets
-        from src.predictor import Predictor
-
-        predictor = Predictor(model, preprocessor, feature_names, metadata=predictor_metadata)
-        y_train_pred_orig = predictor.predict(X_train_full)
-        y_test_pred_orig = predictor.predict(X_test)
         y_train_pred_trans = global_train_pred_trans
         y_test_pred_trans = global_test_pred_trans
         if tail_residual_metadata.get("enabled", False):
@@ -1350,6 +1696,8 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
             "n_train_fit_samples": len(X_train_full),
             "n_validation_samples": 0,
             "final_n_estimators_from_cv": final_n_estimators,
+            "final_n_estimators_source": final_n_estimators_source,
+            "final_n_estimators_override": final_n_estimators_override,
             "fold_best_iterations": fold_best_iterations,
             "training_successful": True,
             "overfitting_check": {
@@ -1431,6 +1779,8 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
                     else None,
                 },
                 "final_n_estimators_from_cv": final_n_estimators,
+                "final_n_estimators_source": final_n_estimators_source,
+                "final_n_estimators_override": final_n_estimators_override,
                 "fold_best_iterations": fold_best_iterations,
                 "overfitting_analysis": {
                     "rmse_ratio_original": test_metrics["rmse"] / train_metrics["rmse"],
