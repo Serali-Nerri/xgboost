@@ -18,6 +18,13 @@ class ConstantModel:
         return np.full(len(X), self.value, dtype=float)
 
 
+class ReportSpaceModel:
+    predicts_in_report_space = True
+
+    def predict(self, X):
+        return X["a"].to_numpy(dtype=float) + 1.0
+
+
 class StubPreprocessor:
     def transform(self, X):
         transformed = X.copy()
@@ -92,3 +99,25 @@ def test_predict_restores_nexp_for_psi_target_without_requiring_nexp_input():
 
     expected_npl = np.array([(1000.0 * 300.0 + 2000.0 * 40.0) / 1000.0, (1200.0 * 320.0 + 1800.0 * 50.0) / 1000.0])
     assert np.allclose(predictions, 0.8 * expected_npl)
+
+
+def test_predict_skips_restoration_when_model_outputs_report_space():
+    predictor = Predictor(
+        model=ReportSpaceModel(),
+        feature_names=["a", "b"],
+        metadata={
+            "target_mode": "raw",
+            "target_transform": {
+                "enabled": True,
+                "type": "log",
+                "mode": "raw",
+                "original_column": "Nexp (kN)",
+            },
+            "prediction_output_in_report_space": True,
+        },
+    )
+    X = pd.DataFrame({"a": [2.0, 5.0], "b": [10.0, 20.0]})
+
+    predictions = predictor.predict(X)
+
+    assert np.allclose(predictions, np.array([3.0, 6.0]))

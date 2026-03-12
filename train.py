@@ -38,6 +38,7 @@ from src.data_loader import DataLoader
 from src.preprocessor import Preprocessor
 from src.model_trainer import ModelTrainer, OPTUNA_SEARCH_SPACE_VERSION
 from src.evaluator import Evaluator
+from src.tail_residual_model import TailResidualEnsemble
 from src.utils.model_utils import save_model
 from src.splitting import (
     build_regression_stratification_labels,
@@ -103,6 +104,7 @@ def build_training_context(
     selection_objective: Dict[str, Any],
     split_strategy: str,
     split_config: Dict[str, Any],
+    tail_residual_config: Dict[str, Any],
     validation_size: float,
     early_stopping_rounds: Optional[int],
     eval_metric: Optional[str],
@@ -122,6 +124,7 @@ def build_training_context(
         "selection_objective": selection_objective,
         "split_strategy": split_strategy,
         "split_config": split_config,
+        "tail_residual_config": tail_residual_config,
         "validation_size": validation_size,
         "early_stopping_rounds": early_stopping_rounds,
         "eval_metric": eval_metric,
@@ -149,6 +152,7 @@ def build_optuna_tuning_fingerprint(
     selection_objective: Dict[str, Any],
     split_strategy: str,
     split_config: Dict[str, Any],
+    tail_residual_config: Dict[str, Any],
     validation_size: float,
     early_stopping_rounds: Optional[int],
     eval_metric: Optional[str],
@@ -161,6 +165,7 @@ def build_optuna_tuning_fingerprint(
         "selection_objective": selection_objective,
         "split_strategy": split_strategy,
         "split_config": split_config,
+        "tail_residual_config": tail_residual_config,
         "validation_size": validation_size,
         "early_stopping_rounds": early_stopping_rounds,
         "eval_metric": eval_metric,
@@ -278,6 +283,82 @@ def build_target_metadata(
             "derived_columns": list(derived_columns),
         },
     }
+
+
+def build_tail_residual_config(model_config: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize optional high-Npl tail residual correction config."""
+    raw_config = model_config.get("tail_residual_correction") or {}
+    if not isinstance(raw_config, dict):
+        raise ValueError("config.model.tail_residual_correction must be a mapping")
+
+    enabled = bool(raw_config.get("enabled", False))
+    if not enabled:
+        return {"enabled": False}
+
+    feature_column = str(raw_config.get("feature_column", "Npl (kN)")).strip()
+    if not feature_column:
+        raise ValueError(
+            "config.model.tail_residual_correction.feature_column must be a non-empty string"
+        )
+
+    threshold_mode = str(raw_config.get("threshold_mode", "train_quantile")).strip().lower()
+    if threshold_mode not in {"train_quantile", "fixed_value"}:
+        raise ValueError(
+            "config.model.tail_residual_correction.threshold_mode must be "
+            "'train_quantile' or 'fixed_value'"
+        )
+
+    normalized: Dict[str, Any] = {
+        "enabled": True,
+        "feature_column": feature_column,
+        "threshold_mode": threshold_mode,
+        "report_prediction_min": float(raw_config.get("report_prediction_min", 0.0)),
+    }
+
+    if threshold_mode == "train_quantile":
+        quantile = float(raw_config.get("quantile", 0.8))
+        if not 0.0 < quantile < 1.0:
+            raise ValueError(
+                "config.model.tail_residual_correction.quantile must be between 0 and 1"
+            )
+        normalized["quantile"] = quantile
+    else:
+        if "threshold_value" not in raw_config:
+            raise ValueError(
+                "config.model.tail_residual_correction.threshold_value is required when "
+                "threshold_mode='fixed_value'"
+            )
+        normalized["threshold_value"] = float(raw_config["threshold_value"])
+
+    params = raw_config.get("params")
+    if params is not None:
+        if not isinstance(params, dict) or not params:
+            raise ValueError(
+                "config.model.tail_residual_correction.params must be a non-empty mapping"
+            )
+        missing_required = sorted(
+            key for key in REQUIRED_MODEL_PARAM_KEYS if key not in params
+        )
+        if missing_required:
+            raise ValueError(
+                "config.model.tail_residual_correction.params is missing required keys: "
+                f"{missing_required}"
+            )
+        normalized["params"] = params.copy()
+    else:
+        normalized["params"] = None
+
+    return normalized
+
+
+def fit_tail_threshold(feature_values: pd.Series, tail_config: Dict[str, Any]) -> float:
+    """Fit a deterministic tail threshold on the training split."""
+    if not tail_config.get("enabled", False):
+        raise ValueError("Tail residual correction is not enabled")
+
+    if tail_config["threshold_mode"] == "train_quantile":
+        return float(np.quantile(feature_values.to_numpy(dtype=float), tail_config["quantile"]))
+    return float(tail_config["threshold_value"])
 
 
 def select_final_n_estimators(cv_results: Dict[str, Any], fallback: int) -> Tuple[int, List[int]]:
@@ -408,6 +489,13 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
 
         # Validate XGBoost params early so study naming matches the real tuning config.
         xgb_params = build_xgb_params(model_config)
+        tail_residual_config = build_tail_residual_config(model_config)
+        if tail_residual_config.get("enabled", False):
+            logger.info(
+                "Tail residual correction enabled: "
+                f"feature={tail_residual_config['feature_column']}, "
+                f"threshold_mode={tail_residual_config['threshold_mode']}"
+            )
 
         training_context = build_training_context(
             data_file_path=data_path,
@@ -419,6 +507,7 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
             selection_objective=selection_objective_config,
             split_strategy=split_strategy,
             split_config=split_config,
+            tail_residual_config=tail_residual_config,
             validation_size=validation_size,
             early_stopping_rounds=early_stopping_rounds,
             eval_metric=eval_metric,
@@ -432,6 +521,7 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
             selection_objective_config,
             split_strategy,
             split_config,
+            tail_residual_config,
             validation_size,
             early_stopping_rounds,
             eval_metric,
@@ -708,6 +798,128 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
             early_stopping_rounds=None,
             eval_metric=None,
         )
+        target_metadata = build_target_metadata(
+            report_target_column=target_column,
+            target_mode=target_mode,
+            target_transform_type=target_transform_type,
+            derived_columns=data_loader.derived_columns,
+        )
+
+        global_train_pred_trans = np.asarray(
+            model.predict(X_train_processed),
+            dtype=float,
+        ).reshape(-1)
+        global_test_pred_trans = np.asarray(
+            model.predict(X_test_processed),
+            dtype=float,
+        ).reshape(-1)
+        global_train_pred_orig = restore_report_target(
+            global_train_pred_trans,
+            target_mode=target_mode,
+            target_transform_type=target_transform_type,
+            reference_features=X_train_processed,
+        )
+        global_test_pred_orig = restore_report_target(
+            global_test_pred_trans,
+            target_mode=target_mode,
+            target_transform_type=target_transform_type,
+            reference_features=X_test_processed,
+        )
+
+        model_family = "single_stage_xgb"
+        tail_residual_metadata: Dict[str, Any] = {"enabled": False}
+        if tail_residual_config.get("enabled", False):
+            tail_feature_column = str(tail_residual_config["feature_column"])
+            if tail_feature_column not in X_train_processed.columns:
+                raise ValueError(
+                    f"Tail residual feature '{tail_feature_column}' was removed by preprocessing. "
+                    "Disable the tail correction or keep this feature in the model input."
+                )
+
+            tail_threshold = fit_tail_threshold(
+                cast(pd.Series, X_train_processed[tail_feature_column]),
+                tail_residual_config,
+            )
+            tail_train_mask = (
+                X_train_processed[tail_feature_column].to_numpy(dtype=float) >= tail_threshold
+            )
+            tail_train_count = int(np.sum(tail_train_mask))
+            if tail_train_count < 20:
+                raise ValueError(
+                    "Tail residual correction produced too few tail training samples: "
+                    f"{tail_train_count}"
+                )
+
+            residual_target = (
+                y_train_report_full.to_numpy(dtype=float)[tail_train_mask]
+                - global_train_pred_orig[tail_train_mask]
+            )
+            tail_params = (
+                tail_residual_config["params"].copy()
+                if tail_residual_config.get("params") is not None
+                else trainer.params.copy()
+            )
+            tail_trainer = ModelTrainer(
+                params=tail_params,
+                use_optuna=False,
+                best_params_path="logs/unused_tail_residual_params.json",
+                optuna_metric_space="original",
+                target_transform_type=None,
+                target_mode="raw",
+                columns_to_drop=[],
+                validation_size=0.0,
+                early_stopping_rounds=None,
+                eval_metric=None,
+                selection_objective=selection_objective_config,
+            )
+            tail_model = tail_trainer.train(
+                X_train_processed.loc[tail_train_mask].copy(),
+                pd.Series(
+                    residual_target,
+                    index=X_train_processed.index[tail_train_mask],
+                    dtype=float,
+                ),
+                eval_set=None,
+                early_stopping_rounds=None,
+                eval_metric=None,
+            )
+            model = TailResidualEnsemble(
+                global_model=model,
+                tail_model=tail_model,
+                tail_feature_name=tail_feature_column,
+                tail_threshold=tail_threshold,
+                target_mode=target_mode,
+                target_transform_type=target_transform_type,
+                report_prediction_min=tail_residual_config["report_prediction_min"],
+                metadata={
+                    "feature_column": tail_feature_column,
+                    "threshold_mode": tail_residual_config["threshold_mode"],
+                },
+            )
+            model_family = "tail_residual_ensemble"
+            tail_residual_metadata = {
+                "enabled": True,
+                "feature_column": tail_feature_column,
+                "threshold_mode": tail_residual_config["threshold_mode"],
+                "threshold_value": tail_threshold,
+                "threshold_source": (
+                    f"train_quantile_{tail_residual_config['quantile']:.4f}"
+                    if tail_residual_config["threshold_mode"] == "train_quantile"
+                    else "fixed_value"
+                ),
+                "tail_train_sample_count": tail_train_count,
+                "tail_train_sample_fraction": tail_train_count / max(len(X_train_processed), 1),
+                "global_model_params": trainer.params.copy(),
+                "tail_residual_model_params": tail_params.copy(),
+                "tail_target_space": target_column,
+            }
+            logger.info(
+                "Tail residual model trained on %s samples (%.2f%%) with %s >= %.6f",
+                tail_train_count,
+                100.0 * tail_residual_metadata["tail_train_sample_fraction"],
+                tail_feature_column,
+                tail_threshold,
+            )
         logger.info(
             "Final model training completed on target space: "
             f"{format_target_space_description(target_column, target_mode, target_transform_type)}"
@@ -722,27 +934,32 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
             regime_config=regime_config,
         )
 
-        # Make predictions on BOTH sets (in transformed space)
+        predictor_metadata = {
+            **target_metadata,
+            "prediction_output_in_report_space": bool(
+                tail_residual_metadata.get("enabled", False)
+            ),
+            "model_family": model_family,
+            "tail_residual_correction": tail_residual_metadata,
+        }
+
+        # Make predictions on BOTH sets
         from src.predictor import Predictor
 
-        predictor = Predictor(model, preprocessor, feature_names)
-        y_train_pred_trans = predictor.predict(X_train_full)
-        y_test_pred_trans = predictor.predict(X_test)
-
-        # Apply inverse transform + target-mode restoration to get back to report space
-        y_train_pred_orig = restore_report_target(
-            y_train_pred_trans,
-            target_mode=target_mode,
-            target_transform_type=target_transform_type,
-            reference_features=X_train_full,
-        )
-        y_test_pred_orig = restore_report_target(
-            y_test_pred_trans,
-            target_mode=target_mode,
-            target_transform_type=target_transform_type,
-            reference_features=X_test,
-        )
-        logger.info("Mapped model outputs back to reported target space")
+        predictor = Predictor(model, preprocessor, feature_names, metadata=predictor_metadata)
+        y_train_pred_orig = predictor.predict(X_train_full)
+        y_test_pred_orig = predictor.predict(X_test)
+        y_train_pred_trans = global_train_pred_trans
+        y_test_pred_trans = global_test_pred_trans
+        if tail_residual_metadata.get("enabled", False):
+            logger.info(
+                "Final predictor outputs reported-target values directly via tail residual correction"
+            )
+            logger.info(
+                "Training-space reference metrics below reflect the global stage only"
+            )
+        else:
+            logger.info("Mapped model outputs back to reported target space")
 
         # Calculate metrics in ORIGINAL space (recommended - true application scenario)
         train_metrics = evaluator.calculate_metrics(
@@ -864,25 +1081,23 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
 
         # Step 8: Save model and artifacts
         logger.info("\nStep 8: Saving model and artifacts...")
-        target_metadata = build_target_metadata(
-            report_target_column=target_column,
-            target_mode=target_mode,
-            target_transform_type=target_transform_type,
-            derived_columns=data_loader.derived_columns,
-        )
-
         # Save model with metadata
         metadata = {
             "config": config,
             "context_hash": context_hash,
             "training_context": training_context,
             "params_source": params_source,
+            "model_family": model_family,
             "final_model_params": trainer.params.copy(),
             "optuna_run_info": optuna_run_info,
             "optuna_metric_space": optuna_metric_space,
             "cv_metric_space": cv_metric_space,
             "selection_objective": trainer.selection_objective,
             **target_metadata,
+            "prediction_output_in_report_space": bool(
+                tail_residual_metadata.get("enabled", False)
+            ),
+            "tail_residual_correction": tail_residual_metadata,
             "split_strategy_requested": split_strategy,
             "split_strategy_effective": effective_split_strategy,
             "stratification_metadata": stratification_metadata,

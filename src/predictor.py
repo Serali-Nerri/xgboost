@@ -132,12 +132,13 @@ class Predictor:
 
             # Make predictions
             predictions = self.model.predict(X_processed)
-            predictions = restore_report_target(
-                predictions,
-                target_mode=self._get_target_mode(),
-                target_transform_type=self._get_target_transform_type(),
-                reference_features=X_reference,
-            )
+            if not self._model_predicts_in_report_space():
+                predictions = restore_report_target(
+                    predictions,
+                    target_mode=self._get_target_mode(),
+                    target_transform_type=self._get_target_transform_type(),
+                    reference_features=X_reference,
+                )
 
             logger.info(f"Predictions completed: {len(predictions)} samples")
             logger.debug(f"Prediction range: [{predictions.min():.4f}, {predictions.max():.4f}]")
@@ -153,6 +154,11 @@ class Predictor:
         target_transform = self.metadata.get("target_transform", {})
         raw_mode = self.metadata.get("target_mode", target_transform.get("mode", "raw"))
         return normalize_target_mode(raw_mode)
+
+    def _model_predicts_in_report_space(self) -> bool:
+        if bool(self.metadata.get("prediction_output_in_report_space", False)):
+            return True
+        return bool(getattr(self.model, "predicts_in_report_space", False))
 
     def _get_target_transform_type(self) -> Optional[str]:
         target_transform = self.metadata.get("target_transform", {})
