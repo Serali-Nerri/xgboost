@@ -38,7 +38,11 @@ from src.data_loader import DataLoader
 from src.preprocessor import Preprocessor
 from src.model_trainer import ModelTrainer, OPTUNA_SEARCH_SPACE_VERSION
 from src.evaluator import Evaluator
-from src.tail_residual_model import TailResidualEnsemble
+from src.tail_residual_model import (
+    TailResidualEnsemble,
+    augment_tail_features,
+    build_tail_training_target,
+)
 from src.utils.model_utils import save_model
 from src.splitting import (
     build_regression_stratification_labels,
@@ -104,6 +108,7 @@ def build_training_context(
     selection_objective: Dict[str, Any],
     split_strategy: str,
     split_config: Dict[str, Any],
+    sample_weight_config: Dict[str, Any],
     tail_residual_config: Dict[str, Any],
     validation_size: float,
     early_stopping_rounds: Optional[int],
@@ -124,6 +129,7 @@ def build_training_context(
         "selection_objective": selection_objective,
         "split_strategy": split_strategy,
         "split_config": split_config,
+        "sample_weight_config": sample_weight_config,
         "tail_residual_config": tail_residual_config,
         "validation_size": validation_size,
         "early_stopping_rounds": early_stopping_rounds,
@@ -152,6 +158,7 @@ def build_optuna_tuning_fingerprint(
     selection_objective: Dict[str, Any],
     split_strategy: str,
     split_config: Dict[str, Any],
+    sample_weight_config: Dict[str, Any],
     tail_residual_config: Dict[str, Any],
     validation_size: float,
     early_stopping_rounds: Optional[int],
@@ -165,6 +172,7 @@ def build_optuna_tuning_fingerprint(
         "selection_objective": selection_objective,
         "split_strategy": split_strategy,
         "split_config": split_config,
+        "sample_weight_config": sample_weight_config,
         "tail_residual_config": tail_residual_config,
         "validation_size": validation_size,
         "early_stopping_rounds": early_stopping_rounds,
@@ -285,6 +293,114 @@ def build_target_metadata(
     }
 
 
+def _normalize_threshold_spec(
+    raw_config: Dict[str, Any],
+    *,
+    config_prefix: str,
+    default_quantile: float,
+) -> Dict[str, Any]:
+    """Normalize train-quantile or fixed-value threshold specs shared by multiple configs."""
+    threshold_mode = str(raw_config.get("threshold_mode", "train_quantile")).strip().lower()
+    if threshold_mode not in {"train_quantile", "fixed_value"}:
+        raise ValueError(
+            f"{config_prefix}.threshold_mode must be 'train_quantile' or 'fixed_value'"
+        )
+
+    normalized: Dict[str, Any] = {"threshold_mode": threshold_mode}
+    if threshold_mode == "train_quantile":
+        quantile = float(raw_config.get("quantile", default_quantile))
+        if not 0.0 < quantile < 1.0:
+            raise ValueError(f"{config_prefix}.quantile must be between 0 and 1")
+        normalized["quantile"] = quantile
+    else:
+        if "threshold_value" not in raw_config:
+            raise ValueError(
+                f"{config_prefix}.threshold_value is required when "
+                "threshold_mode='fixed_value'"
+            )
+        normalized["threshold_value"] = float(raw_config["threshold_value"])
+    return normalized
+
+
+def resolve_threshold_from_config(feature_values: pd.Series, threshold_config: Dict[str, Any]) -> float:
+    """Fit a deterministic threshold from a normalized config payload."""
+    if threshold_config["threshold_mode"] == "train_quantile":
+        return float(
+            np.quantile(
+                feature_values.to_numpy(dtype=float),
+                float(threshold_config["quantile"]),
+            )
+        )
+    return float(threshold_config["threshold_value"])
+
+
+def build_sample_weight_config(model_config: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize optional scale-aware sample weighting for the global model."""
+    raw_config = model_config.get("sample_weighting") or {}
+    if not isinstance(raw_config, dict):
+        raise ValueError("config.model.sample_weighting must be a mapping")
+
+    enabled = bool(raw_config.get("enabled", False))
+    if not enabled:
+        return {"enabled": False}
+
+    mode = str(raw_config.get("mode", "tail_step")).strip().lower()
+    if mode != "tail_step":
+        raise ValueError("config.model.sample_weighting.mode must be 'tail_step'")
+
+    feature_column = str(raw_config.get("feature_column", "Npl (kN)")).strip()
+    if not feature_column:
+        raise ValueError(
+            "config.model.sample_weighting.feature_column must be a non-empty string"
+        )
+
+    below_weight = float(raw_config.get("below_weight", 1.0))
+    above_weight = float(raw_config.get("above_weight", 2.0))
+    if below_weight <= 0.0 or above_weight <= 0.0:
+        raise ValueError("config.model.sample_weighting weights must be positive")
+
+    normalized = {
+        "enabled": True,
+        "mode": mode,
+        "feature_column": feature_column,
+        "below_weight": below_weight,
+        "above_weight": above_weight,
+        **_normalize_threshold_spec(
+            raw_config,
+            config_prefix="config.model.sample_weighting",
+            default_quantile=0.8,
+        ),
+    }
+    return normalized
+
+
+def compute_sample_weight_series(
+    features: pd.DataFrame,
+    sample_weight_config: Dict[str, Any],
+) -> pd.Series:
+    """Compute per-sample weights for the global model from raw feature space."""
+    if not sample_weight_config.get("enabled", False):
+        return pd.Series(1.0, index=features.index, dtype=float)
+
+    feature_column = str(sample_weight_config["feature_column"])
+    if feature_column not in features.columns:
+        raise ValueError(
+            f"Sample-weight feature '{feature_column}' is missing from the training data"
+        )
+
+    threshold = resolve_threshold_from_config(
+        cast(pd.Series, features[feature_column]),
+        sample_weight_config,
+    )
+    feature_values = features[feature_column].to_numpy(dtype=float)
+    weights = np.where(
+        feature_values >= threshold,
+        float(sample_weight_config["above_weight"]),
+        float(sample_weight_config["below_weight"]),
+    )
+    return pd.Series(weights, index=features.index, dtype=float)
+
+
 def build_tail_residual_config(model_config: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize optional high-Npl tail residual correction config."""
     raw_config = model_config.get("tail_residual_correction") or {}
@@ -301,34 +417,53 @@ def build_tail_residual_config(model_config: Dict[str, Any]) -> Dict[str, Any]:
             "config.model.tail_residual_correction.feature_column must be a non-empty string"
         )
 
-    threshold_mode = str(raw_config.get("threshold_mode", "train_quantile")).strip().lower()
-    if threshold_mode not in {"train_quantile", "fixed_value"}:
+    correction_mode = str(raw_config.get("correction_mode", "additive")).strip().lower()
+    if correction_mode not in {"additive", "ratio", "logratio"}:
         raise ValueError(
-            "config.model.tail_residual_correction.threshold_mode must be "
-            "'train_quantile' or 'fixed_value'"
+            "config.model.tail_residual_correction.correction_mode must be one of "
+            "['additive', 'ratio', 'logratio']"
         )
 
     normalized: Dict[str, Any] = {
         "enabled": True,
         "feature_column": feature_column,
-        "threshold_mode": threshold_mode,
+        "correction_mode": correction_mode,
+        "append_global_prediction_features": bool(
+            raw_config.get("append_global_prediction_features", False)
+        ),
         "report_prediction_min": float(raw_config.get("report_prediction_min", 0.0)),
+        **_normalize_threshold_spec(
+            raw_config,
+            config_prefix="config.model.tail_residual_correction",
+            default_quantile=0.8,
+        ),
     }
 
-    if threshold_mode == "train_quantile":
-        quantile = float(raw_config.get("quantile", 0.8))
-        if not 0.0 < quantile < 1.0:
-            raise ValueError(
-                "config.model.tail_residual_correction.quantile must be between 0 and 1"
+    gating_raw = raw_config.get("gating") or {}
+    if not isinstance(gating_raw, dict):
+        raise ValueError("config.model.tail_residual_correction.gating must be a mapping")
+    gating_mode = str(gating_raw.get("mode", "hard")).strip().lower()
+    if gating_mode not in {"hard", "soft_linear"}:
+        raise ValueError(
+            "config.model.tail_residual_correction.gating.mode must be 'hard' or 'soft_linear'"
+        )
+    gating_normalized: Dict[str, Any] = {"mode": gating_mode}
+    if gating_mode == "soft_linear":
+        gating_normalized.update(
+            _normalize_threshold_spec(
+                {
+                    "threshold_mode": gating_raw.get(
+                        "upper_threshold_mode",
+                        "train_quantile",
+                    ),
+                    "quantile": gating_raw.get("upper_quantile", 0.95),
+                    "threshold_value": gating_raw.get("upper_threshold_value"),
+                },
+                config_prefix="config.model.tail_residual_correction.gating",
+                default_quantile=0.95,
             )
-        normalized["quantile"] = quantile
-    else:
-        if "threshold_value" not in raw_config:
-            raise ValueError(
-                "config.model.tail_residual_correction.threshold_value is required when "
-                "threshold_mode='fixed_value'"
-            )
-        normalized["threshold_value"] = float(raw_config["threshold_value"])
+        )
+    normalized["gating"] = gating_normalized
 
     params = raw_config.get("params")
     if params is not None:
@@ -356,9 +491,7 @@ def fit_tail_threshold(feature_values: pd.Series, tail_config: Dict[str, Any]) -
     if not tail_config.get("enabled", False):
         raise ValueError("Tail residual correction is not enabled")
 
-    if tail_config["threshold_mode"] == "train_quantile":
-        return float(np.quantile(feature_values.to_numpy(dtype=float), tail_config["quantile"]))
-    return float(tail_config["threshold_value"])
+    return resolve_threshold_from_config(feature_values, tail_config)
 
 
 def select_final_n_estimators(cv_results: Dict[str, Any], fallback: int) -> Tuple[int, List[int]]:
@@ -489,6 +622,15 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
 
         # Validate XGBoost params early so study naming matches the real tuning config.
         xgb_params = build_xgb_params(model_config)
+        sample_weight_config = build_sample_weight_config(model_config)
+        if sample_weight_config.get("enabled", False):
+            logger.info(
+                "Global sample weighting enabled: "
+                f"mode={sample_weight_config['mode']}, "
+                f"feature={sample_weight_config['feature_column']}, "
+                f"threshold_mode={sample_weight_config['threshold_mode']}, "
+                f"above_weight={sample_weight_config['above_weight']}"
+            )
         tail_residual_config = build_tail_residual_config(model_config)
         if tail_residual_config.get("enabled", False):
             logger.info(
@@ -507,6 +649,7 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
             selection_objective=selection_objective_config,
             split_strategy=split_strategy,
             split_config=split_config,
+            sample_weight_config=sample_weight_config,
             tail_residual_config=tail_residual_config,
             validation_size=validation_size,
             early_stopping_rounds=early_stopping_rounds,
@@ -521,6 +664,7 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
             selection_objective_config,
             split_strategy,
             split_config,
+            sample_weight_config,
             tail_residual_config,
             validation_size,
             early_stopping_rounds,
@@ -679,6 +823,41 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
         )
         logger.info(f"Test set: {len(X_test)} samples ({test_size * 100:.0f}%)")
 
+        global_sample_weight = compute_sample_weight_series(
+            X_train_full,
+            sample_weight_config,
+        )
+        effective_global_sample_weight = (
+            global_sample_weight if sample_weight_config.get("enabled", False) else None
+        )
+        sample_weight_metadata: Dict[str, Any] = {"enabled": False}
+        if sample_weight_config.get("enabled", False):
+            sample_weight_threshold = resolve_threshold_from_config(
+                cast(pd.Series, X_train_full[str(sample_weight_config["feature_column"])]),
+                sample_weight_config,
+            )
+            sample_weight_metadata = {
+                "enabled": True,
+                "mode": sample_weight_config["mode"],
+                "feature_column": sample_weight_config["feature_column"],
+                "threshold_mode": sample_weight_config["threshold_mode"],
+                "threshold_value": sample_weight_threshold,
+                "threshold_source": (
+                    f"train_quantile_{sample_weight_config['quantile']:.4f}"
+                    if sample_weight_config["threshold_mode"] == "train_quantile"
+                    else "fixed_value"
+                ),
+                "below_weight": sample_weight_config["below_weight"],
+                "above_weight": sample_weight_config["above_weight"],
+                "mean_weight": float(global_sample_weight.mean()),
+            }
+            logger.info(
+                "Computed global sample weights: min=%.4f, max=%.4f, mean=%.4f",
+                float(global_sample_weight.min()),
+                float(global_sample_weight.max()),
+                float(global_sample_weight.mean()),
+            )
+
         # Step 3: Prepare trainer for model selection and final refit
         logger.info("\nStep 3: Preparing model selection and final retraining...")
         use_optuna = model_config.get("use_optuna", False)
@@ -719,6 +898,7 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
                 X_train_full,
                 y_train_trans_full,
                 y_report=y_train_report_full,
+                sample_weight=effective_global_sample_weight,
                 cv=cv_splitter,
                 study_name=study_name,
                 storage_url=optuna_storage_url,
@@ -749,6 +929,7 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
             X_train_full,
             y_train_trans_full,
             y_report=y_train_report_full,
+            sample_weight=effective_global_sample_weight,
             cv=cv_splitter,
             metric_space=cv_metric_space,
             target_transform_type=target_transform_type,
@@ -794,6 +975,7 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
         model = trainer.train(
             X_train_processed,
             y_train_trans_full,
+            sample_weight=effective_global_sample_weight,
             eval_set=None,
             early_stopping_rounds=None,
             eval_metric=None,
@@ -840,6 +1022,17 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
                 cast(pd.Series, X_train_processed[tail_feature_column]),
                 tail_residual_config,
             )
+            gating_config = cast(Dict[str, Any], tail_residual_config["gating"])
+            tail_gate_upper_threshold = None
+            if gating_config["mode"] == "soft_linear":
+                tail_gate_upper_threshold = resolve_threshold_from_config(
+                    cast(pd.Series, X_train_processed[tail_feature_column]),
+                    gating_config,
+                )
+                if float(tail_gate_upper_threshold) <= float(tail_threshold):
+                    raise ValueError(
+                        "Tail gating upper threshold must be greater than the tail threshold"
+                    )
             tail_train_mask = (
                 X_train_processed[tail_feature_column].to_numpy(dtype=float) >= tail_threshold
             )
@@ -850,9 +1043,17 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
                     f"{tail_train_count}"
                 )
 
-            residual_target = (
-                y_train_report_full.to_numpy(dtype=float)[tail_train_mask]
-                - global_train_pred_orig[tail_train_mask]
+            tail_target = build_tail_training_target(
+                y_train_report_full.to_numpy(dtype=float)[tail_train_mask],
+                global_train_pred_orig[tail_train_mask],
+                correction_mode=str(tail_residual_config["correction_mode"]),
+            )
+            tail_train_features = augment_tail_features(
+                X_train_processed.loc[tail_train_mask].copy(),
+                global_prediction_report=global_train_pred_orig[tail_train_mask],
+                append_global_prediction_features=bool(
+                    tail_residual_config["append_global_prediction_features"]
+                ),
             )
             tail_params = (
                 tail_residual_config["params"].copy()
@@ -873,9 +1074,9 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
                 selection_objective=selection_objective_config,
             )
             tail_model = tail_trainer.train(
-                X_train_processed.loc[tail_train_mask].copy(),
+                tail_train_features,
                 pd.Series(
-                    residual_target,
+                    tail_target,
                     index=X_train_processed.index[tail_train_mask],
                     dtype=float,
                 ),
@@ -890,6 +1091,12 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
                 tail_threshold=tail_threshold,
                 target_mode=target_mode,
                 target_transform_type=target_transform_type,
+                correction_mode=str(tail_residual_config["correction_mode"]),
+                append_global_prediction_features=bool(
+                    tail_residual_config["append_global_prediction_features"]
+                ),
+                gating_mode=str(gating_config["mode"]),
+                tail_gate_upper_threshold=tail_gate_upper_threshold,
                 report_prediction_min=tail_residual_config["report_prediction_min"],
                 metadata={
                     "feature_column": tail_feature_column,
@@ -909,16 +1116,34 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
                 ),
                 "tail_train_sample_count": tail_train_count,
                 "tail_train_sample_fraction": tail_train_count / max(len(X_train_processed), 1),
+                "correction_mode": tail_residual_config["correction_mode"],
+                "append_global_prediction_features": bool(
+                    tail_residual_config["append_global_prediction_features"]
+                ),
+                "gating_mode": gating_config["mode"],
+                "gating_upper_threshold_value": tail_gate_upper_threshold,
+                "gating_upper_threshold_source": (
+                    (
+                        f"train_quantile_{gating_config['quantile']:.4f}"
+                        if gating_config["threshold_mode"] == "train_quantile"
+                        else "fixed_value"
+                    )
+                    if gating_config["mode"] == "soft_linear"
+                    else None
+                ),
                 "global_model_params": trainer.params.copy(),
                 "tail_residual_model_params": tail_params.copy(),
-                "tail_target_space": target_column,
+                "tail_target_space": tail_residual_config["correction_mode"],
             }
             logger.info(
-                "Tail residual model trained on %s samples (%.2f%%) with %s >= %.6f",
+                "Tail residual model trained on %s samples (%.2f%%) with %s >= %.6f "
+                "(correction_mode=%s, gating=%s)",
                 tail_train_count,
                 100.0 * tail_residual_metadata["tail_train_sample_fraction"],
                 tail_feature_column,
                 tail_threshold,
+                tail_residual_config["correction_mode"],
+                gating_config["mode"],
             )
         logger.info(
             "Final model training completed on target space: "
@@ -1093,6 +1318,7 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
             "optuna_metric_space": optuna_metric_space,
             "cv_metric_space": cv_metric_space,
             "selection_objective": trainer.selection_objective,
+            "sample_weighting": sample_weight_metadata,
             **target_metadata,
             "prediction_output_in_report_space": bool(
                 tail_residual_metadata.get("enabled", False)
@@ -1171,6 +1397,7 @@ def train_model(config_path: str, output_dir: Optional[str] = None) -> Dict[str,
                 "optuna_metric_space": optuna_metric_space,
                 "cv_metric_space": cv_metric_space,
                 "selection_objective": trainer.selection_objective,
+                "sample_weighting": sample_weight_metadata,
                 **target_metadata,
                 "split_strategy_requested": split_strategy,
                 "split_strategy_effective": effective_split_strategy,

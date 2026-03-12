@@ -65,6 +65,33 @@ class ConstantPsiRegressor:
         return np.full(len(X_val), self.constant_prediction, dtype=float)
 
 
+class RecordingWeightedRegressor:
+    last_fit_kwargs = None
+
+    def __init__(self, **kwargs):
+        self.best_iteration = 3
+
+    def fit(
+        self,
+        X_train,
+        y_train,
+        verbose=False,
+        eval_set=None,
+        sample_weight=None,
+        sample_weight_eval_set=None,
+    ):
+        RecordingWeightedRegressor.last_fit_kwargs = {
+            "sample_weight": sample_weight,
+            "sample_weight_eval_set": sample_weight_eval_set,
+            "n_train": len(X_train),
+            "n_eval": len(eval_set[0][0]) if eval_set else 0,
+        }
+        return self
+
+    def predict(self, X_val):
+        return np.zeros(len(X_val), dtype=float)
+
+
 def test_cross_validate_restores_report_space_metrics_for_psi_target(monkeypatch):
     trainer = ModelTrainer(
         params={"device": "cpu", "n_jobs": -1, "random_state": 42},
@@ -170,3 +197,62 @@ def test_selection_objective_matches_planned_formula():
 def test_selection_objective_rejects_unsupported_metric_space():
     with pytest.raises(ValueError, match="selection_objective.metric_space"):
         _build_selection_objective_config({"metric_space": "transformed"})
+
+
+def test_train_passes_sample_weights_to_xgboost(monkeypatch):
+    trainer = ModelTrainer(
+        params={"device": "cpu", "n_jobs": -1, "random_state": 42},
+        validation_size=0.0,
+    )
+    X_train = pd.DataFrame({"a": [1.0, 2.0, 3.0]})
+    y_train = pd.Series([1.0, 2.0, 3.0])
+
+    monkeypatch.setattr(
+        model_trainer_module.xgb,
+        "XGBRegressor",
+        RecordingWeightedRegressor,
+    )
+
+    trainer.train(
+        X_train,
+        y_train,
+        sample_weight=np.array([1.0, 2.0, 3.0]),
+    )
+
+    assert RecordingWeightedRegressor.last_fit_kwargs is not None
+    assert np.allclose(
+        RecordingWeightedRegressor.last_fit_kwargs["sample_weight"],
+        np.array([1.0, 2.0, 3.0]),
+    )
+
+
+def test_cross_validate_splits_and_passes_fold_sample_weights(monkeypatch):
+    trainer = ModelTrainer(
+        params={"device": "cpu", "n_jobs": -1, "random_state": 42},
+        target_mode="raw",
+        target_transform_type=None,
+        validation_size=0.5,
+    )
+    X = pd.DataFrame({"feature_a": [0.0, 1.0, 2.0, 3.0]})
+    y = pd.Series([1.0, 2.0, 3.0, 4.0])
+    y_report = y.copy()
+    sample_weight = pd.Series([1.0, 2.0, 3.0, 4.0])
+    splitter = RecordingSplitter()
+
+    monkeypatch.setattr(
+        model_trainer_module.xgb,
+        "XGBRegressor",
+        RecordingWeightedRegressor,
+    )
+
+    trainer.cross_validate(
+        X,
+        y,
+        y_report=y_report,
+        sample_weight=sample_weight,
+        cv=splitter,
+    )
+
+    assert RecordingWeightedRegressor.last_fit_kwargs is not None
+    assert RecordingWeightedRegressor.last_fit_kwargs["sample_weight"] is not None
+    assert RecordingWeightedRegressor.last_fit_kwargs["sample_weight_eval_set"] is not None
